@@ -314,7 +314,7 @@
   {#if settingsOpen}
     <aside class="settings" aria-label="Visual preferences">
       <div class="settings-title">visual system <button aria-label="Close preferences" on:click={() => settingsOpen = false}>×</button></div>
-      <label class="toggle-row"><span>visuals</span><input type="checkbox" checked={preferences.visualsEnabled} on:change={(event) => void setPreferences({ ...preferences, visualsEnabled: event.currentTarget.checked })} /></label>
+      <label class="toggle-row"><span>reactive visuals</span><input type="checkbox" checked={preferences.visualsEnabled} on:change={(event) => void setPreferences({ ...preferences, visualsEnabled: event.currentTarget.checked })} /></label>
       <fieldset>
         <legend>intensity</legend>
         {#each ["calm", "standard", "high"] as intensity}
@@ -327,7 +327,7 @@
           <button class:active={preferences.quality === quality} on:click={() => void setPreferences({ ...preferences, quality: quality as VisualQuality })}>{quality}</button>
         {/each}
       </fieldset>
-      <p>Visuals use live audio features and adapt their workload. There are no manual palettes, shapes, or shader controls.</p>
+      <p>Reactive visuals use live audio features and adapt their workload. Turn them off for the static artwork. There are no manual palettes, shapes, or shader controls.</p>
       <button class="diagnostics" on:click={exportDiagnostics}>export diagnostics</button>
     </aside>
   {/if}
@@ -353,9 +353,9 @@
         <span class="warning-mark">⚠</span>
         <p class="eyebrow">photosensitivity notice</p>
         <h2 id="warning-title">this player uses reactive, moving light.</h2>
-        <p>Magnet Player’s visual layer responds to the music with particles, color transitions, and occasional bright pulses. You can disable visuals at any time.</p>
+        <p>Magnet Player’s visual layer responds to the music with particles, color transitions, and occasional bright pulses. You can switch to the static artwork at any time.</p>
         <div class="warning-actions">
-          <button class="ghost" on:click={() => { void setPreferences({ ...preferences, visualsEnabled: false }); warningOpen = false; }}>disable visuals</button>
+          <button class="ghost" on:click={() => { void setPreferences({ ...preferences, visualsEnabled: false }); warningOpen = false; }}>use static visual</button>
           <button class="primary" on:click={() => warningOpen = false}>continue</button>
         </div>
       </div>

@@ -16,7 +16,7 @@ main { min-height: 100vh; position: relative; isolation: isolate; overflow: hidd
 .nebula { z-index: -3; background: radial-gradient(circle at 26% 20%, #1b1f53 0, transparent 38%), radial-gradient(circle at 76% 76%, #3b1339 0, transparent 40%), #03050d; transition: opacity 300ms ease; }
 .nebula canvas { display: block; transition: opacity 300ms ease; }
 .vignette { z-index: -2; pointer-events: none; background: radial-gradient(ellipse at center, transparent 0 36%, rgb(2 4 10 / 0.48) 100%), linear-gradient(115deg, rgb(1 2 9 / 0.22), transparent 55%, rgb(1 2 9 / 0.38)); }
-.visuals-off .nebula { background: #070b11; }
+.visuals-off .nebula { background: url("../assets/nebula-static.webp") center / cover no-repeat #070b11; }
 
 .shell { position: relative; width: min(1110px, calc(100vw - 80px)); height: min(760px, calc(100vh - 80px)); min-height: 500px; margin: 40px auto; display: grid; grid-template-rows: 44px 46px auto 1fr auto; overflow: hidden; border: 1px solid rgb(230 245 240 / 0.17); border-radius: 11px; background: linear-gradient(150deg, rgb(11 16 23 / 0.83), rgb(9 12 18 / 0.73)); box-shadow: 0 24px 100px rgb(0 0 0 / 0.48), inset 0 1px 0 rgb(255 255 255 / 0.07); backdrop-filter: blur(20px) saturate(1.25); }
 .titlebar { display: flex; align-items: center; padding: 0 15px; border-bottom: 1px solid rgb(237 247 241 / 0.1); background: rgb(4 7 12 / 0.35); user-select: none; }

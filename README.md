@@ -4,7 +4,7 @@ A Windows-first Spotify desktop client with a dense, keyboard-forward library UI
 
 ## Current alpha shell
 
-The repository contains the packaged Tauri desktop shell, the WebGL visual layer, interaction model, adaptive quality controller, local preferences, diagnostics export, and a typed Rust/TypeScript bridge. Spotify credentials and the librespot/ncspot data core are deliberately isolated behind that bridge.
+The repository contains the packaged Tauri desktop shell, the WebGL visual layer, wallpaper-backed static visual end state, interaction model, adaptive quality controller, local preferences, diagnostics export, and a typed Rust/TypeScript bridge. Spotify credentials and the librespot/ncspot data core are deliberately isolated behind that bridge.
 
 ## Development
 
@@ -23,4 +23,3 @@ npm run tauri dev
 ## Third-party lineage
 
 The production Spotify core will adapt selected components from [ncspot](https://github.com/hrkfdn/ncspot), which is BSD-2-Clause licensed. See `NOTICE` before importing or shipping adapted source.
-
