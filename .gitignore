@@ -1,0 +1,8 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/.env
+.env
+*.log
+src-tauri/icons/**
+!src-tauri/icons/icon.ico
