@@ -24,7 +24,7 @@ use std::{
     path::PathBuf,
     sync::Mutex,
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -33,7 +33,7 @@ mod catalog;
 
 const MAGNET_SPOTIFY_CLIENT_ID: &str = "49a6085899814912912b8174495e7702";
 const SPOTIFY_REDIRECT_URI: &str = "http://127.0.0.1:5002/auth/spotify/callback";
-const SPOTIFY_SCOPES: &str = "user-read-private user-read-email user-library-read playlist-read-private playlist-read-collaborative streaming";
+const SPOTIFY_SCOPES: &str = "user-read-private user-read-email user-library-read user-library-modify playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private streaming";
 const SPOTIFY_KEYRING_SERVICE: &str = "magnet";
 const LEGACY_SPOTIFY_KEYRING_SERVICE: &str = "magnet-player";
 const SPOTIFY_KEYRING_ACCOUNT: &str = "spotify-refresh-token";
@@ -104,33 +104,15 @@ struct AppSnapshot {
     playback: PlaybackState,
     playlist_context_id: Option<String>,
     authenticated: bool,
+    catalog_loading: bool,
     spotify_configured: bool,
     message: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum VisualIntensity {
-    Calm,
-    Standard,
-    High,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum VisualQuality {
-    Auto,
-    Eco,
-    High,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Preferences {
-    visuals_enabled: bool,
     foreground_hidden: bool,
-    intensity: VisualIntensity,
-    quality: VisualQuality,
 }
 
 struct PendingLogin {
@@ -191,6 +173,16 @@ enum PlayerAction {
     PlayPlaylist {
         playlist_id: String,
     },
+    SetSaved {
+        track_id: String,
+        #[serde(default)]
+        track: Option<Track>,
+        saved: bool,
+    },
+    AddToPlaylist {
+        track_id: String,
+        playlist_id: String,
+    },
     TogglePlayback,
     Next,
     Previous,
@@ -224,6 +216,7 @@ struct AppState {
     snapshot: Mutex<AppSnapshot>,
     preferences: Mutex<Preferences>,
     pending_login: Mutex<Option<PendingLogin>>,
+    oauth_callback_ready: Mutex<bool>,
     spotify_session: Mutex<Option<SpotifySession>>,
     native_player: Mutex<Option<Spirc>>,
     audio_analyzer: Mutex<Option<audio_analysis::AudioAnalyzerHandle>>,
@@ -232,14 +225,15 @@ struct AppState {
 
 impl AppState {
     fn new() -> Self {
-        let library = demo_library();
+        let library = demo_library().into_iter().take(3).collect::<Vec<_>>();
         let now_playing = library.first().cloned();
         Self {
             snapshot: Mutex::new(AppSnapshot {
                 revision: 0,
                 view: ViewId::Library,
-                queue: library[..6]
+                queue: library
                     .iter()
+                    .take(3)
                     .enumerate()
                     .map(|(index, track)| QueueEntry {
                         queue_id: format!("demo-{}", index + 1),
@@ -258,18 +252,17 @@ impl AppState {
                 },
                 playlist_context_id: None,
                 authenticated: false,
+                catalog_loading: false,
                 spotify_configured: true,
                 message: Some(
                     "Desktop shell preview — connect Spotify to link your library.".into(),
                 ),
             }),
             preferences: Mutex::new(Preferences {
-                visuals_enabled: false,
                 foreground_hidden: false,
-                intensity: VisualIntensity::Standard,
-                quality: VisualQuality::Auto,
             }),
             pending_login: Mutex::new(None),
+            oauth_callback_ready: Mutex::new(false),
             spotify_session: Mutex::new(None),
             native_player: Mutex::new(None),
             audio_analyzer: Mutex::new(None),
@@ -633,6 +626,57 @@ fn apply_player_action(
             snapshot.playback.position_ms = 0;
             snapshot.playback.playing = true;
         }
+        PlayerAction::SetSaved {
+            track_id,
+            track,
+            saved,
+        } => {
+            if snapshot.authenticated {
+                let access_token = catalog_access_token(state)?;
+                catalog::set_track_saved(
+                    &reqwest::blocking::Client::new(),
+                    &access_token,
+                    track_id,
+                    *saved,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            if *saved {
+                if let Some(existing) = snapshot.library.iter_mut().find(|item| item.id == *track_id) {
+                    existing.saved = Some(true);
+                } else if let Some(mut track) = track.clone() {
+                    track.saved = Some(true);
+                    snapshot.library.insert(0, track);
+                }
+                snapshot.message = Some("Saved to your library.".into());
+            } else {
+                snapshot.library.retain(|item| item.id != *track_id);
+                snapshot.message = Some("Removed from your library.".into());
+            }
+        }
+        PlayerAction::AddToPlaylist {
+            track_id,
+            playlist_id,
+        } => {
+            if !snapshot.authenticated {
+                return Err("Connect Spotify to edit playlists.".into());
+            }
+            let access_token = catalog_access_token(state)?;
+            catalog::add_track_to_playlist(
+                &reqwest::blocking::Client::new(),
+                &access_token,
+                playlist_id,
+                track_id,
+            )
+            .map_err(|error| error.to_string())?;
+            let name = snapshot
+                .playlists
+                .iter()
+                .find(|playlist| playlist.id == *playlist_id)
+                .map(|playlist| playlist.name.as_str())
+                .unwrap_or("playlist");
+            snapshot.message = Some(format!("Added to {name}."));
+        }
         PlayerAction::TogglePlayback => snapshot.playback.playing = !snapshot.playback.playing,
         PlayerAction::Seek { position_ms } => snapshot.playback.position_ms = *position_ms,
         PlayerAction::SetVolume { volume } => snapshot.playback.volume = volume.clamp(0.0, 1.0),
@@ -741,6 +785,8 @@ fn action_needs_native_player(action: &PlayerAction) -> bool {
         action,
         PlayerAction::SetView { .. }
             | PlayerAction::Enqueue { .. }
+            | PlayerAction::SetSaved { .. }
+            | PlayerAction::AddToPlaylist { .. }
             | PlayerAction::MoveQueueItem { .. }
             | PlayerAction::RemoveQueueItem { .. }
             | PlayerAction::ClearQueue
@@ -839,6 +885,8 @@ fn dispatch_to_native_player(
             command(player.repeat_track(playback.repeat == RepeatMode::Track))
         }
         PlayerAction::Enqueue { .. }
+        | PlayerAction::SetSaved { .. }
+        | PlayerAction::AddToPlaylist { .. }
         | PlayerAction::MoveQueueItem { .. }
         | PlayerAction::RemoveQueueItem { .. }
         | PlayerAction::ClearQueue
@@ -847,15 +895,17 @@ fn dispatch_to_native_player(
 }
 
 #[tauri::command]
-fn begin_login(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+fn begin_login(_app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let client_id = spotify_client_id();
     let verifier = random_urlsafe(64)?;
     let csrf_state = random_urlsafe(24)?;
-    let listener = TcpListener::bind("127.0.0.1:5002")
-        .map_err(|_| "Magnet could not reserve its Spotify sign-in callback on 127.0.0.1:5002. Close any app using that port and try again.".to_string())?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|error| format!("Spotify callback setup failed: {error}"))?;
+    if !*state
+        .oauth_callback_ready
+        .lock()
+        .map_err(|_| "Spotify callback status is unavailable.".to_string())?
+    {
+        return Err("Magnet's Spotify callback server is unavailable on 127.0.0.1:5002. Restart Magnet and make sure no other app is using that port.".into());
+    }
 
     {
         let mut pending = state
@@ -869,8 +919,6 @@ fn begin_login(app: AppHandle, state: State<'_, AppState>) -> Result<(), String>
     }
 
     let authorization_url = spotify_authorization_url(&client_id, &csrf_state, &verifier);
-    let callback_app = app.clone();
-    thread::spawn(move || wait_for_oauth_callback(callback_app, listener, client_id));
     tauri_plugin_opener::open_url(&authorization_url, None::<String>)
         .map_err(|error| format!("Could not open Spotify sign-in: {error}"))?;
 
@@ -936,8 +984,7 @@ fn random_urlsafe(byte_length: usize) -> Result<String, String> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-fn wait_for_oauth_callback(app: AppHandle, listener: TcpListener, client_id: String) {
-    let deadline = Instant::now() + Duration::from_secs(300);
+fn serve_oauth_callbacks(app: AppHandle, listener: TcpListener, client_id: String) {
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -947,23 +994,13 @@ fn wait_for_oauth_callback(app: AppHandle, listener: TcpListener, client_id: Str
                     Err(error) => (false, error),
                 };
                 update_oauth_status(&app, authenticated, message);
-                return;
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                if Instant::now() >= deadline {
-                    update_oauth_status(
-                        &app,
-                        false,
-                        "Spotify sign-in timed out. Try connecting again when you are ready."
-                            .into(),
-                    );
-                    return;
-                }
                 thread::sleep(Duration::from_millis(80));
             }
             Err(error) => {
                 update_oauth_status(&app, false, format!("Spotify callback failed: {error}"));
-                return;
+                thread::sleep(Duration::from_secs(1));
             }
         }
     }
@@ -1018,14 +1055,15 @@ fn complete_oauth_callback(
     let code = params
         .get("code")
         .ok_or_else(|| "Spotify did not return an authorization code.".to_string())?;
+    // Acknowledge the browser before making any network calls. Token/profile
+    // requests can take seconds; leaving the redirect socket open until then
+    // makes browsers report an empty or failed localhost response.
+    write_callback_page(
+        &mut stream,
+        true,
+        "Sign-in received. Magnet is finishing the connection — you can close this tab.",
+    );
     let token = exchange_code_for_token(client_id, code, &pending.verifier)?;
-    let profile = spotify_profile(&token.access_token)?;
-    let account_name = profile
-        .display_name
-        .clone()
-        .unwrap_or_else(|| profile.id.clone());
-    let library_result = spotify_saved_tracks(&token.access_token);
-    let playlists_result = spotify_playlists(&token.access_token);
     let refresh_token = token.refresh_token.clone().ok_or_else(|| {
         "Spotify did not return a reusable refresh token. Try connecting again.".to_string()
     })?;
@@ -1037,60 +1075,77 @@ fn complete_oauth_callback(
         .lock()
         .map_err(|_| "Spotify session storage is unavailable.".to_string())? =
         Some(SpotifySession {
-            access_token: token.access_token,
+            access_token: token.access_token.clone(),
             refresh_token: Some(refresh_token),
             expires_at_ms,
         });
+    // From this point forward the account is linked. Never leave the sample
+    // catalog visible merely because Spotify throttles an optional profile or
+    // library request immediately after authorization.
+    begin_catalog_loading(app)?;
+
+    // Token exchange is the only work the callback needs to wait for. Profile
+    // and library endpoints can be slow or rate-limited; doing them here left
+    // the desktop UI looking permanently disconnected after a valid redirect.
+    let catalog_app = app.clone();
+    thread::spawn(move || {
+        let library_result = spotify_saved_tracks(&token.access_token);
+        let playlists_result = spotify_playlists(&token.access_token);
+        let profile_result = spotify_profile(&token.access_token);
+        let account_name = profile_result
+            .as_ref()
+            .ok()
+            .and_then(|profile| profile.display_name.clone().or_else(|| Some(profile.id.clone())))
+            .unwrap_or_else(|| "your Spotify account".into());
+        let mut loaded = Vec::new();
+        let mut issues = Vec::new();
+        if let Err(error) = &profile_result {
+            issues.push(format!("profile: {error}"));
+        }
+        if let (Ok(profile), Ok(library), Ok(playlists)) = (&profile_result, &library_result, &playlists_result) {
+            if let Err(error) = store_collection_cache(&catalog_app, &profile.id, library, playlists) {
+                issues.push(format!("offline cache: {error}"));
+            }
+        }
+        match library_result {
+            Ok(library) => {
+                loaded.push(format!("{} saved tracks", library.len()));
+                if let Err(error) = sync_library_snapshot(&catalog_app, library) {
+                    issues.push(format!("saved tracks: {error}"));
+                }
+            }
+            Err(error) => issues.push(format!("saved tracks: {error}")),
+        }
+        match playlists_result {
+            Ok(playlists) => {
+                loaded.push(format!("{} playlists", playlists.len()));
+                if let Err(error) = sync_playlists_snapshot(&catalog_app, playlists) {
+                    issues.push(format!("playlists: {error}"));
+                }
+            }
+            Err(error) => issues.push(format!("playlists: {error}")),
+        }
+        let mut message = format!("Spotify connected as {account_name}");
+        if !loaded.is_empty() {
+            message.push_str(&format!(" · {} loaded", loaded.join(", ")));
+        }
+        if !issues.is_empty() {
+            message.push_str(&format!(" · could not load {}", issues.join("; ")));
+        }
+        message.push('.');
+        finish_catalog_loading(&catalog_app);
+        update_oauth_status(&catalog_app, true, message);
+    });
 
     let native_app = app.clone();
     tauri::async_runtime::spawn(async move {
         match start_native_player(native_app.clone(), native_access_token).await {
-            Ok(()) => update_native_player_status(
-                &native_app,
-                "Native Spotify audio is ready on this device.".into(),
-            ),
-            Err(error) => update_native_player_status(
-                &native_app,
-                format!("Native Spotify audio could not start: {error}"),
-            ),
+            Ok(()) => update_native_player_status(&native_app, "Native Spotify audio is ready on this device.".into()),
+            Err(error) => update_native_player_status(&native_app, format!("Native Spotify audio could not start: {error}")),
         }
     });
 
-    let mut loaded = Vec::new();
-    let mut issues = Vec::new();
-    if let (Ok(library), Ok(playlists)) = (&library_result, &playlists_result) {
-        if let Err(error) = store_collection_cache(app, &profile.id, library, playlists) {
-            issues.push(format!("offline cache: {error}"));
-        }
-    }
-    match library_result {
-        Ok(library) => {
-            loaded.push(format!("{} saved tracks", library.len()));
-            sync_library_snapshot(app, library)?;
-        }
-        Err(error) => issues.push(format!("saved tracks: {error}")),
-    }
-    match playlists_result {
-        Ok(playlists) => {
-            loaded.push(format!("{} playlists", playlists.len()));
-            sync_playlists_snapshot(app, playlists)?;
-        }
-        Err(error) => issues.push(format!("playlists: {error}")),
-    }
-    let mut message = format!("Spotify connected as {account_name}");
-    if !loaded.is_empty() {
-        message.push_str(&format!(" · {} loaded", loaded.join(", ")));
-    }
-    if !issues.is_empty() {
-        message.push_str(&format!(" · could not load {}", issues.join("; ")));
-    }
-    message.push('.');
-    write_callback_page(
-        &mut stream,
-        true,
-        "Spotify is connected. You can close this tab and return to Magnet.",
-    );
-    Ok(message)
+    Ok("Spotify connected. Loading your library…".into())
 }
 
 fn exchange_code_for_token(
@@ -1190,23 +1245,13 @@ fn restore_spotify_session(app: AppHandle) {
         if let Ok(mut snapshot) = app.state::<AppState>().snapshot.lock() {
             snapshot.message = Some("Restoring Spotify session…".into());
         }
+        let _ = begin_catalog_loading(&app);
 
         let result = refresh_access_token(&spotify_client_id(), &refresh_token).and_then(|token| {
             let rotated_refresh_token = token.refresh_token.as_deref().unwrap_or(&refresh_token);
             if token.refresh_token.is_some() {
                 persist_refresh_token(rotated_refresh_token)?;
             }
-            let profile = spotify_profile(&token.access_token)?;
-            let account_name = profile
-                .display_name
-                .clone()
-                .unwrap_or_else(|| profile.id.clone());
-            if let Ok(cache) = load_collection_cache(&app, &profile.id) {
-                sync_library_snapshot(&app, cache.tracks)?;
-                sync_playlists_snapshot(&app, cache.playlists)?;
-            }
-            let library_result = spotify_saved_tracks(&token.access_token);
-            let playlists_result = spotify_playlists(&token.access_token);
             let native_access_token = token.access_token.clone();
             let expires_at_ms = now_ms().saturating_add(u128::from(token.expires_in) * 1_000);
 
@@ -1215,14 +1260,37 @@ fn restore_spotify_session(app: AppHandle) {
                 .lock()
                 .map_err(|_| "Spotify session storage is unavailable.".to_string())? =
                 Some(SpotifySession {
-                    access_token: token.access_token,
-                    refresh_token: Some(rotated_refresh_token.to_owned()),
-                    expires_at_ms,
-                });
+                    access_token: token.access_token.clone(),
+                refresh_token: Some(rotated_refresh_token.to_owned()),
+                expires_at_ms,
+            });
+
+            // A refresh token is sufficient proof of a linked account. Do not
+            // demote it back to the connect screen if optional profile or
+            // catalog calls are throttled immediately afterwards.
+            update_oauth_status(&app, true, "Spotify session restored. Loading your library…".into());
+
+            let library_result = spotify_saved_tracks(&token.access_token);
+            let playlists_result = spotify_playlists(&token.access_token);
+            let profile_result = spotify_profile(&token.access_token);
+            let account_name = profile_result
+                .as_ref()
+                .ok()
+                .and_then(|profile| profile.display_name.clone().or_else(|| Some(profile.id.clone())))
+                .unwrap_or_else(|| "your Spotify account".into());
+            if let Ok(profile) = &profile_result {
+                if let Ok(cache) = load_collection_cache(&app, &profile.id) {
+                    sync_library_snapshot(&app, cache.tracks)?;
+                    sync_playlists_snapshot(&app, cache.playlists)?;
+                }
+            }
 
             let mut loaded = Vec::new();
             let mut issues = Vec::new();
-            if let (Ok(library), Ok(playlists)) = (&library_result, &playlists_result) {
+            if let Err(error) = &profile_result {
+                issues.push(format!("profile: {error}"));
+            }
+            if let (Ok(profile), Ok(library), Ok(playlists)) = (&profile_result, &library_result, &playlists_result) {
                 if let Err(error) = store_collection_cache(&app, &profile.id, library, playlists) {
                     issues.push(format!("offline cache: {error}"));
                 }
@@ -1250,6 +1318,7 @@ fn restore_spotify_session(app: AppHandle) {
                 message.push_str(&format!(" · could not load {}", issues.join("; ")));
             }
             message.push('.');
+            finish_catalog_loading(&app);
             update_oauth_status(&app, true, message.clone());
 
             let native_app = app.clone();
@@ -1271,6 +1340,7 @@ fn restore_spotify_session(app: AppHandle) {
         if let Err(error) = result {
             if let Ok(mut snapshot) = app.state::<AppState>().snapshot.lock() {
                 snapshot.authenticated = false;
+                snapshot.catalog_loading = false;
                 snapshot.message = Some(format!(
                     "Saved Spotify session could not be restored: {error}"
                 ));
@@ -1280,7 +1350,7 @@ fn restore_spotify_session(app: AppHandle) {
 }
 
 fn spotify_profile(access_token: &str) -> Result<SpotifyProfile, String> {
-    let response = reqwest::blocking::Client::new()
+    let response = spotify_http_client()?
         .get("https://api.spotify.com/v1/me")
         .bearer_auth(access_token)
         .send()
@@ -1329,13 +1399,35 @@ fn store_collection_cache(
 }
 
 fn spotify_saved_tracks(access_token: &str) -> Result<Vec<Track>, String> {
-    catalog::saved_tracks(&reqwest::blocking::Client::new(), access_token)
-        .map_err(|error| error.to_string())
+    const BACKOFF_SECONDS: [u64; 4] = [5, 15, 30, 60];
+    let mut last_error = None;
+    for delay in BACKOFF_SECONDS.into_iter().chain(std::iter::once(0)) {
+        match catalog::saved_tracks(&spotify_http_client()?, access_token) {
+            Ok(tracks) => return Ok(tracks),
+            Err(error) => {
+                let message = error.to_string();
+                if !message.contains("429") || delay == 0 {
+                    return Err(message);
+                }
+                last_error = Some(message);
+                thread::sleep(Duration::from_secs(delay));
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "Spotify saved tracks could not be loaded.".into()))
 }
 
 fn spotify_playlists(access_token: &str) -> Result<Vec<Playlist>, String> {
-    catalog::playlists(&reqwest::blocking::Client::new(), access_token)
+    catalog::playlists(&spotify_http_client()?, access_token)
         .map_err(|error| error.to_string())
+}
+
+fn spotify_http_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(25))
+        .build()
+        .map_err(|error| format!("Could not initialize Spotify networking: {error}"))
 }
 
 fn sync_library_snapshot(app: &AppHandle, library: Vec<Track>) -> Result<(), String> {
@@ -1354,6 +1446,31 @@ fn sync_library_snapshot(app: &AppHandle, library: Vec<Track>) -> Result<(), Str
     drop(snapshot);
     publish_player_state(app);
     Ok(())
+}
+
+fn begin_catalog_loading(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut snapshot = state
+        .snapshot
+        .lock()
+        .map_err(|_| "Player state is unavailable.".to_string())?;
+    snapshot.catalog_loading = true;
+    snapshot.queue.clear();
+    snapshot.library.clear();
+    snapshot.playlists.clear();
+    snapshot.playback.track = None;
+    snapshot.playback.position_ms = 0;
+    snapshot.playback.playing = false;
+    drop(snapshot);
+    publish_player_state(app);
+    Ok(())
+}
+
+fn finish_catalog_loading(app: &AppHandle) {
+    if let Ok(mut snapshot) = app.state::<AppState>().snapshot.lock() {
+        snapshot.catalog_loading = false;
+    }
+    publish_player_state(app);
 }
 
 fn sync_playlists_snapshot(app: &AppHandle, playlists: Vec<Playlist>) -> Result<(), String> {
@@ -1492,6 +1609,31 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::new())
         .setup(|app| {
+            // Keep the callback server alive for the whole app lifetime. OAuth
+            // pages routinely sit open for more than a few minutes, so a
+            // one-shot listener can disappear before Spotify redirects back.
+            match TcpListener::bind("127.0.0.1:5002") {
+                Ok(listener) => match listener.set_nonblocking(true) {
+                    Ok(()) => {
+                        if let Ok(mut ready) = app.state::<AppState>().oauth_callback_ready.lock() {
+                            *ready = true;
+                        }
+                        let callback_app = app.handle().clone();
+                        let client_id = spotify_client_id();
+                        thread::spawn(move || serve_oauth_callbacks(callback_app, listener, client_id));
+                    }
+                    Err(error) => {
+                        if let Ok(mut snapshot) = app.state::<AppState>().snapshot.lock() {
+                            snapshot.message = Some(format!("Spotify callback setup failed: {error}"));
+                        }
+                    }
+                },
+                Err(error) => {
+                    if let Ok(mut snapshot) = app.state::<AppState>().snapshot.lock() {
+                        snapshot.message = Some(format!("Spotify callback server unavailable on 127.0.0.1:5002: {error}"));
+                    }
+                }
+            }
             // The refresh token lives in Windows Credential Manager, never in
             // the app data folder. Restore it off the UI thread so launch stays
             // immediate even when Spotify is slow to answer.
@@ -1514,13 +1656,13 @@ pub fn run() {
 
 fn demo_library() -> Vec<Track> {
     [
-        ("Fontaines D.C.", "Nabokov", "5:21"),
+        ("Nabokov", "Fontaines D.C.", "5:21"),
         (
             "You Don't Need Anyone",
             "oskar med k, kris., mondaé",
             "2:38",
         ),
-        ("Flagstaff", "Ax and the Hatchetmen", "2:47"),
+        ("This Modern Love", "Bloc Party", "4:26"),
         ("Cross The Street", "Junior Varsity", "2:47"),
         ("Truth", "Flycatcher", "3:12"),
         ("East Village", "Spacey Jane", "3:31"),

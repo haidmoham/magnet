@@ -1,7 +1,7 @@
 # Magnet
 
 A lightweight Windows Spotify client with a dense, keyboard-forward library
-and a restrained reactive visual layer.
+and a static space-artwork layer.
 
 ![Magnet library and player](docs/magnet-player-interface.png)
 
@@ -12,8 +12,8 @@ and a restrained reactive visual layer.
 - Plays Spotify through the native desktop player (Spotify Premium required).
 - Loads your saved tracks and playlists, with Spotify-wide track and playlist search.
 - Keeps a manipulable queue: add, reorder, remove, or clear tracks without leaving the player.
-- Pairs the library UI with audio-reactive visuals, plus a wallpaper-backed static visual mode and a foreground-free view.
-- Keeps control surfaces intentionally small: visual mode, intensity, and quality—not a wall of preferences.
+- Pairs the library UI with real space imagery, a live spectrum histogram, and a foreground-free visual view.
+- Keeps control surfaces intentionally small: image selection and visual mode.
 
 ## First launch
 
@@ -25,7 +25,7 @@ Magnet stores its Spotify refresh token in Windows Credential Manager, not in th
 
 ## Visuals
 
-The visual layer is a deliberate aesthetic tradeoff, not an excuse for sluggish interaction. It responds to decoded playback audio, falls back to a static wallpaper state when appropriate, and can hide the foreground entirely. Playback and library interactions remain the product's priority.
+Magnet uses static NASA/Hubble artwork as its visual layer. The spectrum responds to decoded playback audio, while the image stays still; visual mode can hide the foreground entirely. Playback and library interactions remain the product's priority.
 
 ## Development
 

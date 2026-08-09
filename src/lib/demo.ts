@@ -1,9 +1,9 @@
 import type { AppSnapshot, Preferences, Track, VisualFrame } from "./types";
 
 export const demoTracks: Track[] = [
-  { id: "1", title: "Fontaines D.C.", artists: ["Nabokov"], album: "August 2026", durationMs: 321000, saved: true },
+  { id: "1", title: "Nabokov", artists: ["Fontaines D.C."], album: "August 2026", durationMs: 321000, saved: true },
   { id: "2", title: "You Don't Need Anyone", artists: ["oskar med k", "kris.", "mondaé"], album: "August 2026", durationMs: 158000 },
-  { id: "3", title: "Flagstaff", artists: ["Ax and the Hatchetmen"], album: "August 2026", durationMs: 167000 },
+  { id: "3", title: "This Modern Love", artists: ["Bloc Party"], album: "August 2026", durationMs: 266000 },
   { id: "4", title: "Cross The Street", artists: ["Junior Varsity"], album: "August 2026", durationMs: 167000 },
   { id: "5", title: "Truth", artists: ["Flycatcher"], album: "August 2026", durationMs: 192000 },
   { id: "6", title: "East Village", artists: ["Spacey Jane"], album: "August 2026", durationMs: 211000 },
@@ -20,10 +20,7 @@ export const demoTracks: Track[] = [
 ];
 
 export const demoPreferences: Preferences = {
-  visualsEnabled: false,
   foregroundHidden: false,
-  intensity: "standard",
-  quality: "auto",
 };
 
 export const demoSnapshot: AppSnapshot = {
@@ -41,6 +38,7 @@ export const demoSnapshot: AppSnapshot = {
     repeat: "off",
   },
   authenticated: false,
+  catalogLoading: false,
   spotifyConfigured: false,
   message: "Desktop shell preview — Spotify connection requires your bundled app ID.",
 };

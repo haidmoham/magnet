@@ -3,7 +3,7 @@
   import { bridge } from "./lib/bridge";
   import { demoPreferences, demoSnapshot, demoVisualFrame } from "./lib/demo";
   import { duration, percent } from "./lib/format";
-  import type { AppSnapshot, PlayerAction, Playlist, Preferences, SearchKind, Track, ViewId, VisualFrame, VisualIntensity, VisualQuality } from "./lib/types";
+  import type { AppSnapshot, PlayerAction, Playlist, Preferences, SearchKind, Track, ViewId, VisualFrame } from "./lib/types";
 
   let snapshot: AppSnapshot = demoSnapshot;
   let preferences: Preferences = demoPreferences;
@@ -27,11 +27,10 @@
   let commandOpen = false;
   let commandText = "";
   let settingsOpen = false;
-  let warningOpen = true;
+  let trackMenu: TrackMenu | null = null;
+  let playlistMenu: PlaylistMenu | null = null;
   let selectedArtworkId = "nebula";
   let customArtworkUrl: string | null = null;
-  let rendererHost: HTMLDivElement;
-  let renderer: import("./lib/visualizer").NebulaRenderer | null = null;
   let statusMessage = snapshot.message;
   let visualFrame: VisualFrame = demoVisualFrame(0);
   let interactionRevision = 0;
@@ -40,11 +39,13 @@
 
   $: playlistDetailActive = snapshot.view === "browse" && openedPlaylist !== null;
   $: showingPlaylists = !playlistDetailActive && (snapshot.view === "browse" || (snapshot.view === "search" && searchKind === "playlists"));
-  $: trackRows = snapshot.view === "queue" ? snapshot.queue.map((entry) => entry.track) : snapshot.view === "search" ? searchTracks : playlistDetailActive ? openedPlaylistTracks : snapshot.view === "browse" ? [] : snapshot.library;
+  $: trackRows = !snapshot.authenticated
+    ? snapshot.library.slice(0, 3)
+    : snapshot.view === "queue" ? snapshot.queue.map((entry) => entry.track) : snapshot.view === "search" ? searchTracks : playlistDetailActive ? openedPlaylistTracks : snapshot.view === "browse" ? [] : snapshot.library;
   $: visibleTracks = snapshot.view !== "search" && query.trim()
     ? trackRows.filter((track) => `${track.title} ${track.artists.join(" ")} ${track.album}`.toLowerCase().includes(query.toLowerCase()))
     : trackRows;
-  $: visiblePlaylists = snapshot.view === "search" ? searchPlaylists : snapshot.playlists;
+  $: visiblePlaylists = snapshot.authenticated ? (snapshot.view === "search" ? searchPlaylists : snapshot.playlists) : [];
   $: current = snapshot.playback.track;
   $: progress = current ? Math.min(1, snapshot.playback.positionMs / current.durationMs) : 0;
   $: spectrumBars = makeSpectrumBars(visualFrame);
@@ -72,6 +73,9 @@
     { id: "ngc1300", name: "NGC 1300", credit: "NASA / ESA / Hubble", src: new URL("./assets/space/ngc1300.webp", import.meta.url).href },
     { id: "helix", name: "Helix Nebula", credit: "NASA / NOAO / ESA / Hubble", src: new URL("./assets/space/helix.webp", import.meta.url).href },
   ];
+
+  type TrackMenu = { track: Track; x: number; y: number; playlistPicker: boolean };
+  type PlaylistMenu = { playlist: Playlist; x: number; y: number };
 
   function selectedIndex(): number {
     return Math.max(0, visibleTracks.findIndex((track) => track.id === selectedId));
@@ -138,7 +142,6 @@
     try {
       snapshot = await bridge.snapshot();
       preferences = await bridge.preferences();
-      renderer?.setPreferences(preferences);
       statusMessage = snapshot.message;
     } catch (error) {
       statusMessage = error instanceof Error ? error.message : String(error);
@@ -249,8 +252,6 @@
 
   async function setPreferences(next: Preferences): Promise<void> {
     preferences = next;
-    if (next.visualsEnabled) void ensureRenderer();
-    renderer?.setPreferences(next);
     if (bridge.isTauri) {
       try {
         await bridge.setPreferences(next);
@@ -258,16 +259,6 @@
         statusMessage = error instanceof Error ? error.message : String(error);
       }
     }
-  }
-
-  async function ensureRenderer(): Promise<void> {
-    if (renderer) {
-      renderer.setPreferences(preferences);
-      return;
-    }
-    const { NebulaRenderer } = await import("./lib/visualizer");
-    renderer = new NebulaRenderer(rendererHost);
-    renderer.setPreferences(preferences);
   }
 
   function enterVisualMode(): void {
@@ -280,18 +271,13 @@
     void setPreferences({ ...preferences, foregroundHidden: false });
   }
 
-  function selectVisualSource(visualsEnabled: boolean): void {
-    if (preferences.visualsEnabled === visualsEnabled) return;
-    void setPreferences({ ...preferences, visualsEnabled });
-  }
-
   function selectArtwork(id: string): void {
     selectedArtworkId = id;
     if (customArtworkUrl) {
       URL.revokeObjectURL(customArtworkUrl);
       customArtworkUrl = null;
     }
-    void setPreferences({ ...preferences, visualsEnabled: false });
+    void setPreferences(preferences);
   }
 
   function uploadArtwork(event: Event): void {
@@ -311,7 +297,7 @@
     customArtworkUrl = URL.createObjectURL(file);
     selectedArtworkId = "custom";
     statusMessage = `Using ${file.name} as static artwork.`;
-    void setPreferences({ ...preferences, visualsEnabled: false });
+    void setPreferences(preferences);
   }
 
   async function login(): Promise<void> {
@@ -348,6 +334,51 @@
   function activatePlaylist(playlist: Playlist): void {
     void dispatch({ type: "play_playlist", playlistId: playlist.id });
     statusMessage = `Starting ${playlist.name}`;
+  }
+
+  function openTrackMenu(event: MouseEvent, track: Track): void {
+    event.preventDefault();
+    selectedId = track.id;
+    playlistMenu = null;
+    trackMenu = { track, x: Math.min(event.clientX, window.innerWidth - 250), y: Math.min(event.clientY, window.innerHeight - 360), playlistPicker: false };
+  }
+
+  function openPlaylistMenu(event: MouseEvent, playlist: Playlist): void {
+    event.preventDefault();
+    trackMenu = null;
+    playlistMenu = { playlist, x: Math.min(event.clientX, window.innerWidth - 250), y: Math.min(event.clientY, window.innerHeight - 220) };
+  }
+
+  function openSelectedTrackMenu(): void {
+    const track = snapshot.view === "queue" ? snapshot.queue[selectedQueueIndex()]?.track : visibleTracks[selectedIndex()];
+    if (!track) return;
+    playlistMenu = null;
+    trackMenu = { track, x: Math.max(24, Math.round(window.innerWidth / 2 - 114)), y: Math.max(24, Math.round(window.innerHeight / 2 - 180)), playlistPicker: false };
+  }
+
+  function searchFromMenu(value: string): void {
+    trackMenu = null;
+    playlistMenu = null;
+    searchKind = "tracks";
+    openView("search");
+    query = value;
+  }
+
+  async function queueNext(track: Track): Promise<void> {
+    await dispatch({ type: "enqueue", trackId: track.id, track });
+    const queued = snapshot.queue.at(-1);
+    if (queued) await dispatch({ type: "move_queue_item", queueId: queued.queueId, toIndex: 0 });
+    statusMessage = `${track.title} will play next.`;
+  }
+
+  async function copySpotifyLink(kind: "track" | "playlist", id: string): Promise<void> {
+    const url = `https://open.spotify.com/${kind}/${id}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      statusMessage = "Spotify link copied.";
+    } catch {
+      statusMessage = url;
+    }
   }
 
   function schedulePlaylistOpen(playlist: Playlist): void {
@@ -429,6 +460,8 @@
       return;
     }
     if (event.key === "Escape") {
+      trackMenu = null;
+      playlistMenu = null;
       commandOpen = false;
       settingsOpen = false;
       query = "";
@@ -437,6 +470,25 @@
     if (event.key === " ") {
       event.preventDefault();
       void dispatch({ type: "toggle_playback" });
+      return;
+    }
+    if (event.key === ".") {
+      const track = snapshot.view === "queue" ? snapshot.queue[selectedQueueIndex()]?.track : visibleTracks[selectedIndex()];
+      if (track) void queueNext(track);
+      return;
+    }
+    if (event.key.toLowerCase() === "o") {
+      openSelectedTrackMenu();
+      return;
+    }
+    if (event.key.toLowerCase() === "s") {
+      const track = snapshot.view === "queue" ? snapshot.queue[selectedQueueIndex()]?.track : visibleTracks[selectedIndex()];
+      if (track) void dispatch({ type: "set_saved", trackId: track.id, track, saved: !track.saved });
+      return;
+    }
+    if (event.key.toLowerCase() === "x") {
+      const track = snapshot.view === "queue" ? snapshot.queue[selectedQueueIndex()]?.track : visibleTracks[selectedIndex()];
+      if (track) void copySpotifyLink("track", track.id);
       return;
     }
     if (event.key === "F1") { event.preventDefault(); openView("queue"); return; }
@@ -513,10 +565,8 @@
 
     void (async () => {
       await refresh();
-      if (preferences.visualsEnabled) await ensureRenderer();
       unlisten = await bridge.onVisualFrame((frame) => {
         visualFrame = frame;
-        renderer?.setFrame(frame);
       });
       unlistenAuth = await bridge.onSpotifyAuth((result) => {
         statusMessage = result.message;
@@ -532,7 +582,6 @@
       if (!bridge.isTauri) {
         const tick = () => {
           visualFrame = demoVisualFrame(performance.now());
-          renderer?.setFrame(visualFrame);
           stopDemo = requestAnimationFrame(tick);
         };
         stopDemo = requestAnimationFrame(tick);
@@ -547,7 +596,6 @@
       unlisten?.();
       unlistenAuth?.();
       unlistenPlayer?.();
-      renderer?.dispose();
     };
   });
 
@@ -558,26 +606,24 @@
 
 <svelte:window on:keydown={keydown} />
 
-<main class:visuals-off={!preferences.visualsEnabled} class:foreground-hidden={preferences.foregroundHidden} style={`--static-art: url("${activeArtwork}")`}>
-  <div class="nebula" bind:this={rendererHost} aria-hidden="true"></div>
+<main class:foreground-hidden={preferences.foregroundHidden} style={`--static-art: url("${activeArtwork}")`}>
+  <div class="nebula" aria-hidden="true"></div>
   <div class="vignette" aria-hidden="true"></div>
-  {#if !preferences.visualsEnabled}
-    <div class="frequency-overlay" role="img" aria-label="Frequency histogram">
-      <div class="frequency-header"><span class="frequency-label">live spectrum</span><span>audio analysis</span></div>
-      <div class="frequency-bars" aria-hidden="true">
-        {#each spectrumBars as bar}
-          <span class="frequency-bar" style={`--bar-height: ${Math.round(bar * 100)}%`}></span>
-        {/each}
-      </div>
+  <div class="frequency-overlay" role="img" aria-label="Frequency histogram">
+    <div class="frequency-header"><span class="frequency-label">live spectrum</span><span>audio analysis</span></div>
+    <div class="frequency-bars" aria-hidden="true">
+      {#each spectrumBars as bar, index}
+        <span class:wide={index % 7 === 0} class:thin={index % 5 === 0} class="frequency-bar" style={`--bar-height: ${Math.round(bar * 100)}%`}></span>
+      {/each}
     </div>
-  {/if}
+  </div>
 
   <section class="shell" aria-label="Magnet">
     <header class="titlebar" data-tauri-drag-region>
       <div class="brand" data-tauri-drag-region><span class="brand-mark">✦</span> magnet</div>
       <div class="connection" data-tauri-drag-region>
         <span class:online={snapshot.authenticated} class="connection-dot"></span>
-        {snapshot.authenticated ? "spotify connected" : "offline library"}
+        {snapshot.authenticated ? "spotify connected" : "spotify not connected"}
       </div>
       <button class="visual-mode-button" aria-label="Enter visual mode" on:click={enterVisualMode}>focus visual</button>
       <button class="icon-button settings-button" aria-label="Open visual preferences" on:click={() => settingsOpen = !settingsOpen}>◌</button>
@@ -616,7 +662,19 @@
     </div>
 
     <div class="track-list" role="listbox" aria-label={showingPlaylists ? "Playlists" : "Tracks"}>
-      {#if snapshot.view === "search" && !query.trim()}
+      {#if !snapshot.authenticated}
+        <section class="connect-stage" aria-label="Connect Spotify">
+          <p class="eyebrow">spotify library</p>
+          <h2>Connect your library.</h2>
+          <p>Saved tracks and playlists will appear here.</p>
+          <button on:click={login}>connect spotify</button>
+          <div class="connect-preview" aria-label="Sample tracks">
+            <div><span>01</span><strong>Nabokov</strong><em>Fontaines D.C.</em></div>
+            <div><span>02</span><strong>This Modern Love</strong><em>Bloc Party</em></div>
+            <div><span>03</span><strong>You Don't Need Anyone</strong><em>oskar med k, kris., mondaé</em></div>
+          </div>
+        </section>
+      {:else if snapshot.view === "search" && !query.trim()}
         <div class="empty-state">type to search spotify</div>
       {:else if showingPlaylists}
         {#each visiblePlaylists as playlist, index (playlist.id)}
@@ -626,6 +684,7 @@
             aria-selected="false"
             on:click={() => schedulePlaylistOpen(playlist)}
             on:dblclick={(event) => { event.preventDefault(); if (playlistOpenTimer) clearTimeout(playlistOpenTimer); playlistOpenTimer = null; activatePlaylist(playlist); }}
+            on:contextmenu={(event) => openPlaylistMenu(event, playlist)}
           >
             <span class="track-index">{String(index + 1).padStart(2, "0")}</span>
             <span class="track-main">
@@ -681,7 +740,7 @@
           aria-selected={track.id === selectedId}
           on:click={() => selectedId = track.id}
           on:dblclick={() => activate(track)}
-          on:contextmenu={(event) => { event.preventDefault(); void dispatch({ type: "enqueue", trackId: track.id, track }); statusMessage = `Queued ${track.title}`; }}
+          on:contextmenu={(event) => openTrackMenu(event, track)}
         >
           <span class="track-index">{track.id === current?.id && snapshot.playback.playing ? "▸" : String(index + 1).padStart(2, "0")}</span>
           <span class="track-main">
@@ -692,7 +751,7 @@
           <span class="track-duration">{duration(track.durationMs)}</span>
         </button>
       {:else}
-        <div class="empty-state">{playlistDetailActive ? (playlistOpening ? "opening playlist…" : playlistOpenError ?? "this playlist is empty") : searchPending ? "searching…" : searchError ?? "no matching tracks"}</div>
+        <div class="empty-state">{playlistDetailActive ? (playlistOpening ? "opening playlist…" : playlistOpenError ?? "this playlist is empty") : snapshot.catalogLoading ? "loading your Spotify library…" : searchPending ? "searching…" : searchError ?? "no matching tracks"}</div>
       {/each}
       {#if snapshot.view === "search" && searchCursors[searchKind] && !searchPending}
         <button class="load-more" on:click={() => void searchSpotify(query.trim(), searchKind, true)}>more results</button>
@@ -737,19 +796,12 @@
 
   {#if settingsOpen}
     <aside class="settings" aria-label="Visual preferences">
-      <div class="settings-title">visual system <button aria-label="Close preferences" on:click={() => settingsOpen = false}>×</button></div>
-      <fieldset class="visual-source">
-        <legend>visual source</legend>
-        <div class="preference-buttons" aria-label="Visual source">
-          <button class:active={!preferences.visualsEnabled} aria-pressed={!preferences.visualsEnabled} on:click={() => selectVisualSource(false)}>static artwork</button>
-          <button class:active={preferences.visualsEnabled} aria-pressed={preferences.visualsEnabled} on:click={() => selectVisualSource(true)}>reactive (alpha)</button>
-        </div>
-      </fieldset>
+      <div class="settings-title">space artwork <button aria-label="Close preferences" on:click={() => settingsOpen = false}>×</button></div>
       <fieldset class="artwork-picker">
         <legend>space image</legend>
         <div class="artwork-grid" aria-label="Static space artwork">
           {#each spaceArtworks as artwork}
-            <button class:active={!preferences.visualsEnabled && selectedArtworkId === artwork.id} aria-label={`Use ${artwork.name}`} title={`${artwork.name} · ${artwork.credit}`} style={`background-image: url("${artwork.src}")`} on:click={() => selectArtwork(artwork.id)}><span>{artwork.name}</span></button>
+            <button class:active={selectedArtworkId === artwork.id} aria-label={`Use ${artwork.name}`} title={`${artwork.name} · ${artwork.credit}`} style={`background-image: url("${artwork.src}")`} on:click={() => selectArtwork(artwork.id)}><span>{artwork.name}</span></button>
           {/each}
           <label class:active={selectedArtworkId === "custom"} class="artwork-upload">
             <input type="file" accept="image/jpeg,image/png,image/webp,image/avif" on:change={uploadArtwork} />
@@ -759,32 +811,16 @@
         <p class="artwork-credit">{selectedArtworkId === "custom" ? "Your local image · session only" : spaceArtworks.find((artwork) => artwork.id === selectedArtworkId)?.credit}</p>
       </fieldset>
       <button class="focus-mode-action" on:click={enterVisualMode}>open visual mode <span>↗</span></button>
-      <fieldset>
-        <legend>intensity</legend>
-        {#each ["calm", "standard", "high"] as intensity}
-          <button class:active={preferences.intensity === intensity} on:click={() => void setPreferences({ ...preferences, intensity: intensity as VisualIntensity })}>{intensity}</button>
-        {/each}
-      </fieldset>
-      <fieldset>
-        <legend>quality</legend>
-        {#each ["auto", "eco", "high"] as quality}
-          <button class:active={preferences.quality === quality} on:click={() => void setPreferences({ ...preferences, quality: quality as VisualQuality })}>{quality}</button>
-        {/each}
-      </fieldset>
-      <p>Static artwork is the primary visual. It keeps the live frequency display without GPU motion. Reactive is an alpha experiment and can be enabled when you want it.</p>
+      <p>Artwork stays still. The spectrum follows playback.</p>
       <button class="diagnostics" on:click={exportDiagnostics}>export diagnostics</button>
     </aside>
   {/if}
 
   {#if preferences.foregroundHidden}
     <div class="visual-mode-return" role="region" aria-label="Visual mode controls">
-      <span>{preferences.visualsEnabled ? "reactive visual · alpha" : "static visual"}</span>
+      <span>static visual</span>
       <button on:click={exitVisualMode}>return to player</button>
     </div>
-  {/if}
-
-  {#if !snapshot.authenticated}
-    <button class="login-cta" on:click={login}>connect spotify <span>↗</span></button>
   {/if}
 
   {#if statusMessage}
@@ -798,18 +834,38 @@
     </form>
   {/if}
 
-  {#if warningOpen}
-    <div class="warning" role="alertdialog" aria-modal="true" aria-labelledby="warning-title">
-      <div>
-        <span class="warning-mark">⚠</span>
-        <p class="eyebrow">photosensitivity notice</p>
-        <h2 id="warning-title">this player can use reactive, moving light.</h2>
-        <p>Static space artwork is the default. The optional reactive alpha layer responds to the music with particles, color transitions, and occasional bright pulses.</p>
-        <div class="warning-actions">
-          <button class="ghost" on:click={() => { void setPreferences({ ...preferences, visualsEnabled: false }); warningOpen = false; }}>use static visual</button>
-          <button class="primary" on:click={() => warningOpen = false}>continue</button>
+  {#if trackMenu}
+    <div class="context-menu" role="menu" aria-label={`Actions for ${trackMenu.track.title}`} style={`left: ${trackMenu.x}px; top: ${trackMenu.y}px`}>
+      <header><span>{trackMenu.track.title}</span><button aria-label="Close menu" on:click={() => trackMenu = null}>×</button></header>
+      <button role="menuitem" on:click={() => { activate(trackMenu!.track); trackMenu = null; }}>play</button>
+      <button role="menuitem" on:click={() => { void queueNext(trackMenu!.track); trackMenu = null; }}>play next</button>
+      <button role="menuitem" on:click={() => { void dispatch({ type: "enqueue", trackId: trackMenu!.track.id, track: trackMenu!.track }); statusMessage = `Queued ${trackMenu!.track.title}`; trackMenu = null; }}>queue</button>
+      <div class="context-rule"></div>
+      <button role="menuitem" on:click={() => searchFromMenu(`artist:${trackMenu!.track.artists[0]}`)}>artist</button>
+      <button role="menuitem" on:click={() => searchFromMenu(`album:${trackMenu!.track.album}`)}>show album</button>
+      <button role="menuitem" on:click={() => { void copySpotifyLink("track", trackMenu!.track.id); trackMenu = null; }}>share</button>
+      <button role="menuitem" on:click={() => searchFromMenu(`${trackMenu!.track.artists[0]} ${trackMenu!.track.title}`)}>similar tracks</button>
+      <button role="menuitem" on:click={() => { void dispatch({ type: "set_saved", trackId: trackMenu!.track.id, track: trackMenu!.track, saved: !trackMenu!.track.saved }); trackMenu = null; }}>{trackMenu.track.saved ? "remove from library" : "save"}</button>
+      <div class="context-rule"></div>
+      <button role="menuitem" class:open={trackMenu.playlistPicker} on:click={() => trackMenu = { ...trackMenu!, playlistPicker: !trackMenu!.playlistPicker }}>add to playlist <span>›</span></button>
+      {#if trackMenu.playlistPicker}
+        <div class="playlist-picker" aria-label="Choose playlist">
+          {#each snapshot.playlists.slice(0, 8) as playlist (playlist.id)}
+            <button role="menuitem" on:click={() => { void dispatch({ type: "add_to_playlist", trackId: trackMenu!.track.id, playlistId: playlist.id }); trackMenu = null; }}>{playlist.name}</button>
+          {:else}
+            <span>no playlists loaded</span>
+          {/each}
         </div>
-      </div>
+      {/if}
+    </div>
+  {:else if playlistMenu}
+    <div class="context-menu" role="menu" aria-label={`Actions for ${playlistMenu.playlist.name}`} style={`left: ${playlistMenu.x}px; top: ${playlistMenu.y}px`}>
+      <header><span>{playlistMenu.playlist.name}</span><button aria-label="Close menu" on:click={() => playlistMenu = null}>×</button></header>
+      <button role="menuitem" on:click={() => { activatePlaylist(playlistMenu!.playlist); playlistMenu = null; }}>play</button>
+      <button role="menuitem" on:click={() => { void openPlaylist(playlistMenu!.playlist); playlistMenu = null; }}>open playlist</button>
+      <div class="context-rule"></div>
+      <button role="menuitem" on:click={() => { void copySpotifyLink("playlist", playlistMenu!.playlist.id); playlistMenu = null; }}>share playlist</button>
     </div>
   {/if}
+
 </main>

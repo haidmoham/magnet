@@ -1,6 +1,4 @@
 export type ViewId = "library" | "search" | "queue" | "browse";
-export type VisualIntensity = "calm" | "standard" | "high";
-export type VisualQuality = "auto" | "eco" | "high";
 
 export interface Track {
   id: string;
@@ -48,6 +46,7 @@ export interface AppSnapshot {
   queue: QueueEntry[];
   playback: PlaybackState;
   authenticated: boolean;
+  catalogLoading: boolean;
   spotifyConfigured: boolean;
   message: string | null;
 }
@@ -66,10 +65,7 @@ export interface VisualFrame {
 }
 
 export interface Preferences {
-  visualsEnabled: boolean;
   foregroundHidden: boolean;
-  intensity: VisualIntensity;
-  quality: VisualQuality;
 }
 
 export interface SpotifyAuthResult {
@@ -80,6 +76,8 @@ export interface SpotifyAuthResult {
 export type PlayerAction =
   | { type: "play_track"; trackId: string; track?: Track }
   | { type: "play_playlist"; playlistId: string }
+  | { type: "set_saved"; trackId: string; track?: Track; saved: boolean }
+  | { type: "add_to_playlist"; trackId: string; playlistId: string }
   | { type: "toggle_playback" }
   | { type: "next" }
   | { type: "previous" }

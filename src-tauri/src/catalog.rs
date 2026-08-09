@@ -36,19 +36,22 @@ use std::{
     io::{self, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 pub(super) const COLLECTION_CACHE_VERSION: u32 = 1;
 const SAVED_TRACKS_URL: &str = "https://api.spotify.com/v1/me/tracks?limit=50";
 const PLAYLISTS_URL: &str = "https://api.spotify.com/v1/me/playlists?limit=50";
 const SEARCH_URL: &str = "https://api.spotify.com/v1/search";
+const SAVED_TRACK_URL: &str = "https://api.spotify.com/v1/me/tracks";
 // Spotify's live Search endpoint currently rejects the catalogue pagination
 // limit for application clients above ten. Keep the page small and use its
 // validated `next` cursor for explicit pagination in the client.
 const SEARCH_PAGE_SIZE: &str = "10";
 const MAX_PAGES: usize = 10_000;
 const MAX_ERROR_BODY_CHARS: usize = 512;
+const MAX_RATE_LIMIT_RETRIES: usize = 3;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
@@ -281,11 +284,16 @@ pub(super) fn saved_tracks(
     client: &Client,
     access_token: &str,
 ) -> Result<Vec<Track>, CatalogError> {
-    paginate(
-        SAVED_TRACKS_URL,
-        |url| get_json::<Page<SavedTrackItem>>(client, access_token, url),
-        |item| item.track.and_then(|track| into_track(track, Some(true))),
-    )
+    // The initial library is an interaction boundary, not a background export.
+    // Returning the first page makes the player usable after one admitted
+    // request; attempting to exhaust a large library at sign-in reliably trips
+    // Spotify's rolling rate limit before anything can be rendered.
+    let page = get_json::<Page<SavedTrackItem>>(client, access_token, SAVED_TRACKS_URL)?;
+    Ok(page
+        .items
+        .into_iter()
+        .filter_map(|item| item.track.and_then(|track| into_track(track, Some(true))))
+        .collect())
 }
 
 pub(super) fn playlists(
@@ -296,6 +304,35 @@ pub(super) fn playlists(
         PLAYLISTS_URL,
         |url| get_json::<Page<Option<SpotifyPlaylist>>>(client, access_token, url),
         |playlist| playlist.and_then(into_playlist),
+    )
+}
+
+pub(super) fn set_track_saved(
+    client: &Client,
+    access_token: &str,
+    track_id: &str,
+    saved: bool,
+) -> Result<(), CatalogError> {
+    let request = if saved {
+        client.put(SAVED_TRACK_URL)
+    } else {
+        client.delete(SAVED_TRACK_URL)
+    };
+    ensure_success(request.bearer_auth(access_token).query(&[("ids", track_id)]).send()?)
+}
+
+pub(super) fn add_track_to_playlist(
+    client: &Client,
+    access_token: &str,
+    playlist_id: &str,
+    track_id: &str,
+) -> Result<(), CatalogError> {
+    ensure_success(
+        client
+            .post(format!("https://api.spotify.com/v1/playlists/{playlist_id}/tracks"))
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "uris": [format!("spotify:track:{track_id}")] }))
+            .send()?,
     )
 }
 
@@ -480,14 +517,42 @@ fn get_json<T: DeserializeOwned>(
     url: &str,
 ) -> Result<T, CatalogError> {
     let url = validate_spotify_url(url)?;
-    let response = client.get(url).bearer_auth(access_token).send()?;
-    let status = response.status();
-    if !status.is_success() {
+    for attempt in 0..=MAX_RATE_LIMIT_RETRIES {
+        let response = client.get(url.clone()).bearer_auth(access_token).send()?;
+        let status = response.status();
+        if status.is_success() {
+            return response.json().map_err(CatalogError::Http);
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RATE_LIMIT_RETRIES {
+            let delay = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or_else(|| Duration::from_secs(1_u64 << attempt));
+            thread::sleep(delay.min(Duration::from_secs(15)));
+            continue;
+        }
         let body = response.text().unwrap_or_default();
         let message = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
         return Err(CatalogError::Spotify { status, message });
     }
-    response.json().map_err(CatalogError::Http)
+    unreachable!("rate-limit retry loop always returns")
+}
+
+fn ensure_success(response: reqwest::blocking::Response) -> Result<(), CatalogError> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let message = response
+        .text()
+        .unwrap_or_default()
+        .chars()
+        .take(MAX_ERROR_BODY_CHARS)
+        .collect();
+    Err(CatalogError::Spotify { status, message })
 }
 
 fn validate_optional_continuation(
