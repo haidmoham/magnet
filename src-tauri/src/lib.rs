@@ -31,10 +31,11 @@ use tauri::{AppHandle, Emitter, Manager, State};
 mod audio_analysis;
 mod catalog;
 
-const VOIDPULSE_SPOTIFY_CLIENT_ID: &str = "49a6085899814912912b8174495e7702";
+const MAGNET_SPOTIFY_CLIENT_ID: &str = "49a6085899814912912b8174495e7702";
 const SPOTIFY_REDIRECT_URI: &str = "http://127.0.0.1:5002/auth/spotify/callback";
 const SPOTIFY_SCOPES: &str = "user-read-private user-read-email user-library-read playlist-read-private playlist-read-collaborative streaming";
-const SPOTIFY_KEYRING_SERVICE: &str = "magnet-player";
+const SPOTIFY_KEYRING_SERVICE: &str = "magnet";
+const LEGACY_SPOTIFY_KEYRING_SERVICE: &str = "magnet-player";
 const SPOTIFY_KEYRING_ACCOUNT: &str = "spotify-refresh-token";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,12 +188,18 @@ enum PlayerAction {
         #[serde(default)]
         track: Option<Track>,
     },
-    PlayPlaylist { playlist_id: String },
+    PlayPlaylist {
+        playlist_id: String,
+    },
     TogglePlayback,
     Next,
     Previous,
-    Seek { position_ms: u32 },
-    SetVolume { volume: f32 },
+    Seek {
+        position_ms: u32,
+    },
+    SetVolume {
+        volume: f32,
+    },
     ToggleShuffle,
     CycleRepeat,
     Enqueue {
@@ -200,10 +207,17 @@ enum PlayerAction {
         #[serde(default)]
         track: Option<Track>,
     },
-    MoveQueueItem { queue_id: String, to_index: usize },
-    RemoveQueueItem { queue_id: String },
+    MoveQueueItem {
+        queue_id: String,
+        to_index: usize,
+    },
+    RemoveQueueItem {
+        queue_id: String,
+    },
     ClearQueue,
-    SetView { view: ViewId },
+    SetView {
+        view: ViewId,
+    },
 }
 
 struct AppState {
@@ -250,7 +264,7 @@ impl AppState {
                 ),
             }),
             preferences: Mutex::new(Preferences {
-                visuals_enabled: true,
+                visuals_enabled: false,
                 foreground_hidden: false,
                 intensity: VisualIntensity::Standard,
                 quality: VisualQuality::Auto,
@@ -838,7 +852,7 @@ fn begin_login(app: AppHandle, state: State<'_, AppState>) -> Result<(), String>
     let verifier = random_urlsafe(64)?;
     let csrf_state = random_urlsafe(24)?;
     let listener = TcpListener::bind("127.0.0.1:5002")
-        .map_err(|_| "Magnet Player could not reserve its Spotify sign-in callback on 127.0.0.1:5002. Close any app using that port and try again.".to_string())?;
+        .map_err(|_| "Magnet could not reserve its Spotify sign-in callback on 127.0.0.1:5002. Close any app using that port and try again.".to_string())?;
     listener
         .set_nonblocking(true)
         .map_err(|error| format!("Spotify callback setup failed: {error}"))?;
@@ -870,7 +884,7 @@ fn export_diagnostics(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
         .app_data_dir()
         .map_err(|error| error.to_string())?;
     fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-    let path = root.join("magnet-player-diagnostics.json");
+    let path = root.join("magnet-diagnostics.json");
     let snapshot = state
         .snapshot
         .lock()
@@ -878,7 +892,7 @@ fn export_diagnostics(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
         .clone();
     let report = serde_json::json!({
         "generated_at_unix_ms": now_ms(),
-        "app": "magnet-player",
+        "app": "magnet",
         "version": env!("CARGO_PKG_VERSION"),
         "spotify_configured": snapshot.spotify_configured,
         "authenticated": snapshot.authenticated,
@@ -898,7 +912,7 @@ fn spotify_client_id() -> String {
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| VOIDPULSE_SPOTIFY_CLIENT_ID.to_owned())
+        .unwrap_or_else(|| MAGNET_SPOTIFY_CLIENT_ID.to_owned())
 }
 
 fn spotify_authorization_url(client_id: &str, csrf_state: &str, verifier: &str) -> String {
@@ -994,7 +1008,11 @@ fn complete_oauth_callback(
         );
     }
     if let Some(error) = params.get("error") {
-        write_callback_page(&mut stream, false, "Spotify sign-in was not completed. You can close this tab and return to Magnet Player.");
+        write_callback_page(
+            &mut stream,
+            false,
+            "Spotify sign-in was not completed. You can close this tab and return to Magnet.",
+        );
         return Err(format!("Spotify sign-in was not completed: {error}."));
     }
     let code = params
@@ -1070,7 +1088,7 @@ fn complete_oauth_callback(
     write_callback_page(
         &mut stream,
         true,
-        "Spotify is connected. You can close this tab and return to Magnet Player.",
+        "Spotify is connected. You can close this tab and return to Magnet.",
     );
     Ok(message)
 }
@@ -1136,7 +1154,21 @@ fn persist_refresh_token(refresh_token: &str) -> Result<(), String> {
 
 fn stored_refresh_token() -> Result<Option<String>, String> {
     match spotify_refresh_token_entry()?.get_password() {
-        Ok(token) if !token.trim().is_empty() => Ok(Some(token)),
+        Ok(token) if !token.trim().is_empty() => return Ok(Some(token)),
+        Ok(_) | Err(keyring::Error::NoEntry) => {}
+        Err(error) => return Err(format!("Could not read the saved Spotify session: {error}")),
+    }
+
+    // Preserve a pre-rename session. The next refresh writes it to Magnet's
+    // credential entry, so users do not have to complete OAuth again merely
+    // because the desktop app was renamed.
+    let legacy = Entry::new(LEGACY_SPOTIFY_KEYRING_SERVICE, SPOTIFY_KEYRING_ACCOUNT)
+        .map_err(|error| format!("Windows Credential Manager is unavailable: {error}"))?;
+    match legacy.get_password() {
+        Ok(token) if !token.trim().is_empty() => {
+            persist_refresh_token(&token)?;
+            Ok(Some(token))
+        }
         Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(format!("Could not read the saved Spotify session: {error}")),
     }
@@ -1375,7 +1407,7 @@ async fn start_native_player(app: AppHandle, access_token: String) -> Result<(),
         }
     });
     let connect_config = ConnectConfig {
-        name: "Magnet Player".into(),
+        name: "Magnet".into(),
         device_type: DeviceType::Computer,
         ..Default::default()
     };
@@ -1427,7 +1459,7 @@ fn update_native_player_status(app: &AppHandle, message: String) {
 
 fn write_callback_page(stream: &mut TcpStream, success: bool, message: &str) {
     let tone = if success { "#5ce8ad" } else { "#f4b46f" };
-    let body = format!("<!doctype html><title>Magnet Player</title><body style=\"margin:0;display:grid;min-height:100vh;place-items:center;background:#070b11;color:#ecf5f0;font:16px ui-monospace,Consolas,monospace\"><main style=\"max-width:36rem;padding:2rem\"><p style=\"color:{tone}\">magnet player</p><h1>{message}</h1></main></body>");
+    let body = format!("<!doctype html><title>Magnet</title><body style=\"margin:0;display:grid;min-height:100vh;place-items:center;background:#070b11;color:#ecf5f0;font:16px ui-monospace,Consolas,monospace\"><main style=\"max-width:36rem;padding:2rem\"><p style=\"color:{tone}\">magnet</p><h1>{message}</h1></main></body>");
     let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
     let _ = stream.write_all(response.as_bytes());
 }
@@ -1477,7 +1509,7 @@ pub fn run() {
             export_diagnostics
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Magnet Player");
+        .expect("error while running Magnet");
 }
 
 fn demo_library() -> Vec<Track> {

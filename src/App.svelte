@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { bridge } from "./lib/bridge";
   import { demoPreferences, demoSnapshot, demoVisualFrame } from "./lib/demo";
   import { duration, percent } from "./lib/format";
@@ -28,6 +28,8 @@
   let commandText = "";
   let settingsOpen = false;
   let warningOpen = true;
+  let selectedArtworkId = "nebula";
+  let customArtworkUrl: string | null = null;
   let rendererHost: HTMLDivElement;
   let renderer: import("./lib/visualizer").NebulaRenderer | null = null;
   let statusMessage = snapshot.message;
@@ -46,18 +48,30 @@
   $: current = snapshot.playback.track;
   $: progress = current ? Math.min(1, snapshot.playback.positionMs / current.durationMs) : 0;
   $: spectrumBars = makeSpectrumBars(visualFrame);
+  $: activeArtwork = customArtworkUrl ?? spaceArtworks.find((artwork) => artwork.id === selectedArtworkId)?.src ?? spaceArtworks[0].src;
   $: if (snapshot.view === "search") scheduleSpotifySearch(query, searchKind);
 
   function makeSpectrumBars(frame: VisualFrame): number[] {
     if (frame.spectrum?.length) {
-      return Array.from({ length: 48 }, (_, index) => Math.max(0.012, Math.min(1, frame.spectrum?.[index] ?? 0)));
+      return Array.from({ length: 48 }, (_, index) => {
+        const idleContour = 0.035 + (Math.sin(index * 1.73) + 1) * 0.012;
+        return Math.max(idleContour, Math.min(1, frame.spectrum?.[index] ?? 0));
+      });
     }
     return Array.from({ length: 48 }, (_, index) => {
       const position = index / 47;
       const band = position < 0.3 ? frame.bass : position < 0.7 ? frame.mid : frame.treble;
-      return Math.max(0.012, Math.min(1, band + frame.energy * 0.12));
+      const idleContour = 0.035 + (Math.sin(index * 1.73) + 1) * 0.012;
+      return Math.max(idleContour, Math.min(1, band + frame.energy * 0.12));
     });
   }
+
+  const spaceArtworks = [
+    { id: "nebula", name: "Violet Field", credit: "Magnet", src: new URL("./assets/nebula-static.webp", import.meta.url).href },
+    { id: "carina", name: "Carina Nebula", credit: "NASA / ESA / Hubble", src: new URL("./assets/space/carina.webp", import.meta.url).href },
+    { id: "ngc1300", name: "NGC 1300", credit: "NASA / ESA / Hubble", src: new URL("./assets/space/ngc1300.webp", import.meta.url).href },
+    { id: "helix", name: "Helix Nebula", credit: "NASA / NOAO / ESA / Hubble", src: new URL("./assets/space/helix.webp", import.meta.url).href },
+  ];
 
   function selectedIndex(): number {
     return Math.max(0, visibleTracks.findIndex((track) => track.id === selectedId));
@@ -235,6 +249,7 @@
 
   async function setPreferences(next: Preferences): Promise<void> {
     preferences = next;
+    if (next.visualsEnabled) void ensureRenderer();
     renderer?.setPreferences(next);
     if (bridge.isTauri) {
       try {
@@ -243,6 +258,16 @@
         statusMessage = error instanceof Error ? error.message : String(error);
       }
     }
+  }
+
+  async function ensureRenderer(): Promise<void> {
+    if (renderer) {
+      renderer.setPreferences(preferences);
+      return;
+    }
+    const { NebulaRenderer } = await import("./lib/visualizer");
+    renderer = new NebulaRenderer(rendererHost);
+    renderer.setPreferences(preferences);
   }
 
   function enterVisualMode(): void {
@@ -260,9 +285,38 @@
     void setPreferences({ ...preferences, visualsEnabled });
   }
 
+  function selectArtwork(id: string): void {
+    selectedArtworkId = id;
+    if (customArtworkUrl) {
+      URL.revokeObjectURL(customArtworkUrl);
+      customArtworkUrl = null;
+    }
+    void setPreferences({ ...preferences, visualsEnabled: false });
+  }
+
+  function uploadArtwork(event: Event): void {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      statusMessage = "Choose an image file (JPG, PNG, WebP, or AVIF).";
+      return;
+    }
+    if (file.size > 16 * 1024 * 1024) {
+      statusMessage = "Choose an image smaller than 16 MB.";
+      return;
+    }
+    if (customArtworkUrl) URL.revokeObjectURL(customArtworkUrl);
+    customArtworkUrl = URL.createObjectURL(file);
+    selectedArtworkId = "custom";
+    statusMessage = `Using ${file.name} as static artwork.`;
+    void setPreferences({ ...preferences, visualsEnabled: false });
+  }
+
   async function login(): Promise<void> {
     if (!bridge.isTauri) {
-      statusMessage = "Run Magnet Player as a Tauri desktop app to begin Spotify OAuth.";
+      statusMessage = "Run Magnet as a Tauri desktop app to begin Spotify OAuth.";
       return;
     }
     try {
@@ -458,10 +512,8 @@
     let unlistenPlayer: (() => void) | null = null;
 
     void (async () => {
-      const { NebulaRenderer } = await import("./lib/visualizer");
-      renderer = new NebulaRenderer(rendererHost);
-      renderer.setPreferences(preferences);
       await refresh();
+      if (preferences.visualsEnabled) await ensureRenderer();
       unlisten = await bridge.onVisualFrame((frame) => {
         visualFrame = frame;
         renderer?.setFrame(frame);
@@ -498,27 +550,31 @@
       renderer?.dispose();
     };
   });
+
+  onDestroy(() => {
+    if (customArtworkUrl) URL.revokeObjectURL(customArtworkUrl);
+  });
 </script>
 
 <svelte:window on:keydown={keydown} />
 
-<main class:visuals-off={!preferences.visualsEnabled} class:foreground-hidden={preferences.foregroundHidden}>
+<main class:visuals-off={!preferences.visualsEnabled} class:foreground-hidden={preferences.foregroundHidden} style={`--static-art: url("${activeArtwork}")`}>
   <div class="nebula" bind:this={rendererHost} aria-hidden="true"></div>
   <div class="vignette" aria-hidden="true"></div>
   {#if !preferences.visualsEnabled}
     <div class="frequency-overlay" role="img" aria-label="Frequency histogram">
-      <span class="frequency-label">frequency</span>
+      <div class="frequency-header"><span class="frequency-label">live spectrum</span><span>audio analysis</span></div>
       <div class="frequency-bars" aria-hidden="true">
         {#each spectrumBars as bar}
-          <span class="frequency-bar" style={`height: ${Math.round(bar * 100)}%`}></span>
+          <span class="frequency-bar" style={`--bar-height: ${Math.round(bar * 100)}%`}></span>
         {/each}
       </div>
     </div>
   {/if}
 
-  <section class="shell" aria-label="Magnet Player">
+  <section class="shell" aria-label="Magnet">
     <header class="titlebar" data-tauri-drag-region>
-      <div class="brand" data-tauri-drag-region><span class="brand-mark">✦</span> magnet player</div>
+      <div class="brand" data-tauri-drag-region><span class="brand-mark">✦</span> magnet</div>
       <div class="connection" data-tauri-drag-region>
         <span class:online={snapshot.authenticated} class="connection-dot"></span>
         {snapshot.authenticated ? "spotify connected" : "offline library"}
@@ -685,9 +741,22 @@
       <fieldset class="visual-source">
         <legend>visual source</legend>
         <div class="preference-buttons" aria-label="Visual source">
-          <button class:active={preferences.visualsEnabled} aria-pressed={preferences.visualsEnabled} on:click={() => selectVisualSource(true)}>reactive</button>
           <button class:active={!preferences.visualsEnabled} aria-pressed={!preferences.visualsEnabled} on:click={() => selectVisualSource(false)}>static artwork</button>
+          <button class:active={preferences.visualsEnabled} aria-pressed={preferences.visualsEnabled} on:click={() => selectVisualSource(true)}>reactive (alpha)</button>
         </div>
+      </fieldset>
+      <fieldset class="artwork-picker">
+        <legend>space image</legend>
+        <div class="artwork-grid" aria-label="Static space artwork">
+          {#each spaceArtworks as artwork}
+            <button class:active={!preferences.visualsEnabled && selectedArtworkId === artwork.id} aria-label={`Use ${artwork.name}`} title={`${artwork.name} · ${artwork.credit}`} style={`background-image: url("${artwork.src}")`} on:click={() => selectArtwork(artwork.id)}><span>{artwork.name}</span></button>
+          {/each}
+          <label class:active={selectedArtworkId === "custom"} class="artwork-upload">
+            <input type="file" accept="image/jpeg,image/png,image/webp,image/avif" on:change={uploadArtwork} />
+            <span>choose image<br /><em>from explorer</em></span>
+          </label>
+        </div>
+        <p class="artwork-credit">{selectedArtworkId === "custom" ? "Your local image · session only" : spaceArtworks.find((artwork) => artwork.id === selectedArtworkId)?.credit}</p>
       </fieldset>
       <button class="focus-mode-action" on:click={enterVisualMode}>open visual mode <span>↗</span></button>
       <fieldset>
@@ -702,14 +771,14 @@
           <button class:active={preferences.quality === quality} on:click={() => void setPreferences({ ...preferences, quality: quality as VisualQuality })}>{quality}</button>
         {/each}
       </fieldset>
-      <p>Reactive visuals use live audio features and adapt their workload. Static artwork keeps the frequency display without GPU motion. Visual mode hides the player chrome and always keeps a return button visible.</p>
+      <p>Static artwork is the primary visual. It keeps the live frequency display without GPU motion. Reactive is an alpha experiment and can be enabled when you want it.</p>
       <button class="diagnostics" on:click={exportDiagnostics}>export diagnostics</button>
     </aside>
   {/if}
 
   {#if preferences.foregroundHidden}
     <div class="visual-mode-return" role="region" aria-label="Visual mode controls">
-      <span>{preferences.visualsEnabled ? "reactive visual" : "static visual"}</span>
+      <span>{preferences.visualsEnabled ? "reactive visual · alpha" : "static visual"}</span>
       <button on:click={exitVisualMode}>return to player</button>
     </div>
   {/if}
@@ -734,8 +803,8 @@
       <div>
         <span class="warning-mark">⚠</span>
         <p class="eyebrow">photosensitivity notice</p>
-        <h2 id="warning-title">this player uses reactive, moving light.</h2>
-        <p>Magnet Player’s visual layer responds to the music with particles, color transitions, and occasional bright pulses. You can switch to the static artwork at any time.</p>
+        <h2 id="warning-title">this player can use reactive, moving light.</h2>
+        <p>Static space artwork is the default. The optional reactive alpha layer responds to the music with particles, color transitions, and occasional bright pulses.</p>
         <div class="warning-actions">
           <button class="ghost" on:click={() => { void setPreferences({ ...preferences, visualsEnabled: false }); warningOpen = false; }}>use static visual</button>
           <button class="primary" on:click={() => warningOpen = false}>continue</button>

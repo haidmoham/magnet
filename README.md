@@ -1,16 +1,16 @@
-# Magnet Player
+# Magnet
 
 A Windows-first Spotify desktop client with a dense, keyboard-forward library UI and a restrained VoidPulse visual layer.
 
-> **First click:** download the current Windows installer from [Releases](https://github.com/haidmoham/magnet-player/releases), install it, then choose **connect Spotify** in Magnet Player. Your browser completes the one-time authorization and the app restores that session on later launches.
+> **First click:** download the current Windows installer from [Releases](https://github.com/haidmoham/magnet/releases), install it, then choose **connect Spotify** in Magnet. Your browser completes the one-time authorization and the app restores that session on later launches.
 
 ## First launch
 
-1. Download and run the Windows installer from [Releases](https://github.com/haidmoham/magnet-player/releases). This is an alpha build; Windows may show the usual unsigned-app warning.
-2. Open Magnet Player and click **connect Spotify**. Sign in and approve the browser prompt, then return to the app.
+1. Download and run the Windows installer from [Releases](https://github.com/haidmoham/magnet/releases). This is an alpha build; Windows may show the usual unsigned-app warning.
+2. Open Magnet and click **connect Spotify**. Sign in and approve the browser prompt, then return to the app.
 3. Let the library finish loading. Double-click a track to play it; single-click a playlist to open it and double-click the playlist to start it.
 
-Magnet Player needs Spotify Premium for native playback. It stores the refresh token in Windows Credential Manager, not in the repository or the app’s catalog cache.
+Magnet needs Spotify Premium for native playback. It stores the refresh token in Windows Credential Manager, not in the repository or the app’s catalog cache.
 
 ## Current alpha shell
 

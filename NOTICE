@@ -1,7 +1,6 @@
-Magnet Player is intended to adapt selected backend concepts and source components
+Magnet is intended to adapt selected backend concepts and source components
 from ncspot (https://github.com/hrkfdn/ncspot), Copyright (c) 2019 Henrik
 Friedrichsen and contributors, licensed under the BSD 2-Clause License.
 
 No ncspot source is included in this initial application shell. Any future adapted
 source must retain its original copyright and BSD 2-Clause license notice.
-

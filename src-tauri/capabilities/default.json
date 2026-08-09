@@ -1,8 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability set for the primary Magnet Player window.",
+  "description": "Capability set for the primary Magnet window.",
   "windows": ["main"],
   "permissions": ["core:default", "opener:default"]
 }
-

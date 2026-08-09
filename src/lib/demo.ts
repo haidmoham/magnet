@@ -20,7 +20,7 @@ export const demoTracks: Track[] = [
 ];
 
 export const demoPreferences: Preferences = {
-  visualsEnabled: true,
+  visualsEnabled: false,
   foregroundHidden: false,
   intensity: "standard",
   quality: "auto",

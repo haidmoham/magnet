@@ -1,5 +1,5 @@
 [package]
-name = "magnet-player"
+name = "magnet"
 version = "0.1.0-alpha.3"
 description = "A dense Spotify desktop client with an authored visual layer"
 authors = ["Mo"]
@@ -7,7 +7,7 @@ edition = "2021"
 rust-version = "1.77"
 
 [lib]
-name = "magnet_player_lib"
+name = "magnet_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
