@@ -1,6 +1,8 @@
 # Magnet
 
-A Windows-first Spotify desktop client with a dense, keyboard-forward library UI and a restrained VoidPulse visual layer.
+A Windows-first Spotify desktop client with a dense, keyboard-forward library UI and a restrained reactive visual layer.
+
+![Magnet — static visual mode](docs/magnet-desktop.png)
 
 > **First click:** download the current Windows installer from [Releases](https://github.com/haidmoham/magnet/releases), install it, then choose **connect Spotify** in Magnet. Your browser completes the one-time authorization and the app restores that session on later launches.
 
@@ -29,7 +31,7 @@ Every `v*` Git tag builds the NSIS installer on a clean Windows GitHub Actions r
 
 ## Product constraints
 
-- The existing VoidPulse website is not a dependency.
+- No external visual website is a dependency.
 - Visual controls are intentionally limited to visuals, intensity, and quality.
 - The physics-inspired visual layer is an intentional performance tradeoff: it
   must respond to decoded audio, retain a wallpaper-backed static end state,
