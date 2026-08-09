@@ -3,7 +3,7 @@
 A lightweight Windows Spotify client with a dense, keyboard-forward library
 and a restrained reactive visual layer.
 
-![Magnet library and player](docs/magnet-desktop.png)
+![Magnet library and player](docs/magnet-player-interface.png)
 
 > **Get started:** [download the Windows installer](https://github.com/haidmoham/magnet/releases), install it, then select **connect Spotify** in Magnet. Authorization completes in your browser once; later launches restore the saved session.
 
