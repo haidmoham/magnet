@@ -1,6 +1,7 @@
 node_modules/
 dist/
 src-tauri/target/
+src-tauri/target-interaction/
 src-tauri/.env
 .env
 *.log

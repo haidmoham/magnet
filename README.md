@@ -2,6 +2,16 @@
 
 A Windows-first Spotify desktop client with a dense, keyboard-forward library UI and a restrained VoidPulse visual layer.
 
+> **First click:** download the current Windows installer from [Releases](https://github.com/haidmoham/magnet-player/releases), install it, then choose **connect Spotify** in Magnet Player. Your browser completes the one-time authorization and the app restores that session on later launches.
+
+## First launch
+
+1. Download and run the Windows installer from [Releases](https://github.com/haidmoham/magnet-player/releases). This is an alpha build; Windows may show the usual unsigned-app warning.
+2. Open Magnet Player and click **connect Spotify**. Sign in and approve the browser prompt, then return to the app.
+3. Let the library finish loading. Double-click a track to play it; single-click a playlist to open it and double-click the playlist to start it.
+
+Magnet Player needs Spotify Premium for native playback. It stores the refresh token in Windows Credential Manager, not in the repository or the app’s catalog cache.
+
 ## Current alpha shell
 
 The repository contains the packaged Tauri desktop shell, the WebGL visual layer, wallpaper-backed static visual end state, interaction model, adaptive quality controller, local preferences, diagnostics export, and a typed Rust/TypeScript bridge. Spotify credentials and the librespot/ncspot data core are deliberately isolated behind that bridge.
@@ -12,6 +22,10 @@ The repository contains the packaged Tauri desktop shell, the WebGL visual layer
 npm install
 npm run tauri dev
 ```
+
+## Releases
+
+Every `v*` Git tag builds the NSIS installer on a clean Windows GitHub Actions runner and attaches it to the matching GitHub Release. The installer is always regenerated from the tagged commit; binaries are not checked into this repository.
 
 ## Product constraints
 

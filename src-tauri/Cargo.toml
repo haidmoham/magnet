@@ -1,6 +1,6 @@
 [package]
 name = "magnet-player"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 description = "A dense Spotify desktop client with an authored visual layer"
 authors = ["Mo"]
 edition = "2021"
