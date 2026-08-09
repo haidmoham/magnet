@@ -1,22 +1,31 @@
 # Magnet
 
-A Windows-first Spotify desktop client with a dense, keyboard-forward library UI and a restrained reactive visual layer.
+A lightweight Windows Spotify client with a dense, keyboard-forward library
+and a restrained reactive visual layer.
 
-![Magnet — static visual mode](docs/magnet-desktop.png)
+![Magnet library and player](docs/magnet-desktop.png)
 
-> **First click:** download the current Windows installer from [Releases](https://github.com/haidmoham/magnet/releases), install it, then choose **connect Spotify** in Magnet. Your browser completes the one-time authorization and the app restores that session on later launches.
+> **Get started:** [download the Windows installer](https://github.com/haidmoham/magnet/releases), install it, then select **connect Spotify** in Magnet. Authorization completes in your browser once; later launches restore the saved session.
+
+## What it does
+
+- Plays Spotify through the native desktop player (Spotify Premium required).
+- Loads your saved tracks and playlists, with Spotify-wide track and playlist search.
+- Keeps a manipulable queue: add, reorder, remove, or clear tracks without leaving the player.
+- Pairs the library UI with audio-reactive visuals, plus a wallpaper-backed static visual mode and a foreground-free view.
+- Keeps control surfaces intentionally small: visual mode, intensity, and quality—not a wall of preferences.
 
 ## First launch
 
-1. Download and run the Windows installer from [Releases](https://github.com/haidmoham/magnet/releases). This is an alpha build; Windows may show the usual unsigned-app warning.
-2. Open Magnet and click **connect Spotify**. Sign in and approve the browser prompt, then return to the app.
-3. Let the library finish loading. Double-click a track to play it; single-click a playlist to open it and double-click the playlist to start it.
+1. Download and run the installer from [Releases](https://github.com/haidmoham/magnet/releases). This is an unsigned alpha build, so Windows may show its standard warning.
+2. Open Magnet and choose **connect Spotify**. Sign in and approve the browser prompt, then return to the app.
+3. Let the library finish loading. Single-click a playlist to open it; double-click one to start it. Double-click a track to play it.
 
-Magnet needs Spotify Premium for native playback. It stores the refresh token in Windows Credential Manager, not in the repository or the app’s catalog cache.
+Magnet stores its Spotify refresh token in Windows Credential Manager, not in the repository or catalog cache. No analytics or remote telemetry are included.
 
-## Current alpha shell
+## Visuals
 
-The repository contains the packaged Tauri desktop shell, the WebGL visual layer, wallpaper-backed static visual end state, interaction model, adaptive quality controller, local preferences, diagnostics export, and a typed Rust/TypeScript bridge. Spotify credentials and the librespot/ncspot data core are deliberately isolated behind that bridge.
+The visual layer is a deliberate aesthetic tradeoff, not an excuse for sluggish interaction. It responds to decoded playback audio, falls back to a static wallpaper state when appropriate, and can hide the foreground entirely. Playback and library interactions remain the product's priority.
 
 ## Development
 
@@ -27,21 +36,8 @@ npm run tauri dev
 
 ## Releases
 
-Every `v*` Git tag builds the NSIS installer on a clean Windows GitHub Actions runner and attaches it to the matching GitHub Release. The installer is always regenerated from the tagged commit; binaries are not checked into this repository.
+Every `v*` Git tag builds an NSIS installer on a clean Windows GitHub Actions runner and attaches it to the matching GitHub Release. Installers are generated from their tagged commit; binaries are not checked into this repository.
 
-## Product constraints
+## Credits
 
-- No external visual website is a dependency.
-- Visual controls are intentionally limited to visuals, intensity, and quality.
-- The physics-inspired visual layer is an intentional performance tradeoff: it
-  must respond to decoded audio, retain a wallpaper-backed static end state,
-  and never be used to excuse sluggish interaction.
-- New product scope stays atomic and deliberate. Prefer a specific music-player
-  capability that earns its place in the keyboard-forward flow over broad
-  preference surfaces or feature accumulation.
-- Playback must use a dedicated Spotify app identity and a Premium account.
-- No analytics or remote telemetry are included.
-
-## Third-party lineage
-
-The production Spotify core will adapt selected components from [ncspot](https://github.com/hrkfdn/ncspot), which is BSD-2-Clause licensed. See `NOTICE` before importing or shipping adapted source.
+Magnet uses the Spotify desktop-client ecosystem, including selected architectural lineage from [ncspot](https://github.com/hrkfdn/ncspot) (BSD-2-Clause). See [NOTICE](NOTICE) for attribution and licensing detail.
