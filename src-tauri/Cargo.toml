@@ -30,3 +30,9 @@ sha2 = "0.10"
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 url = "2"
+
+# Tauri's Linux backend still depends on the archived GTK3 bindings, which
+# require glib 0.18. The upstream 0.18 backport fixes the unsound
+# VariantStrIter out-parameter without changing the GTK3 API.
+[patch.crates-io]
+glib = { git = "https://github.com/gtk-rs/gtk-rs-core", rev = "ea720152f28e293ef4362ee844ee5cc499f32d2a" }
