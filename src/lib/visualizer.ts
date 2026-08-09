@@ -4,6 +4,7 @@ import type { Preferences, VisualFrame } from "./types";
 const VERTEX_SHADER = /* glsl */ `
   attribute float aSeed;
   attribute float aLayer;
+  attribute float aSize;
   uniform float uTime;
   uniform float uBass;
   uniform float uMid;
@@ -17,36 +18,40 @@ const VERTEX_SHADER = /* glsl */ `
   varying float vLayer;
   varying float vTwinkle;
   varying float vHue;
+  varying float vArm;
 
   void main() {
     vec3 position = position;
     float layer = aLayer;
-    float spin = uTime * (0.035 + uEnergy * 0.065) + layer * 0.05;
+    float spin = uTime * (0.115 + uEnergy * 0.14) + layer * 0.05;
     position.xy = mat2(cos(spin), -sin(spin), sin(spin), cos(spin)) * position.xy;
 
     vec2 radial = normalize(position.xy + vec2(0.0001));
     float breathe = uBass * (0.22 + layer * 0.22) * uIntensity + uEnergy * 0.10 + uTransient * 0.08;
-    float tide = sin(uTime * (0.45 + layer * 0.25) + aSeed * 18.85) * (0.018 + uTreble * 0.05);
+    float tide = sin(uTime * (0.65 + layer * 0.25) + aSeed * 18.85) * (0.010 + uTreble * 0.025);
     position.xy += radial * (breathe + tide);
     position.z += sin(uTime * (0.32 + layer * 0.40) + aSeed * 31.4) * (0.045 + uTreble * 0.10);
     position.z += uOnset * (0.035 + layer * 0.06) * sin(aSeed * 83.0);
     position.x += uStereo * 0.07 * sin(aSeed * 29.0 + uTime * 0.7);
 
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-    gl_PointSize = min(18.0, (0.8 + layer * 1.6 + uTreble * 1.5 + uTransient * 1.2) * (155.0 / -mvPosition.z));
+    gl_PointSize = min(11.5, aSize * (0.62 + layer * 0.62 + uTreble * 0.48 + uTransient * 0.36) * (112.0 / -mvPosition.z));
     gl_Position = projectionMatrix * mvPosition;
     vLayer = layer;
     vTwinkle = 0.72 + 0.28 * sin(uTime * (1.3 + layer) + aSeed * 74.0);
     vHue = fract(0.57 + layer * 0.31 + aSeed * 0.08 + uMid * 0.12 + uBass * 0.05);
+    vArm = 0.56 + 0.44 * sin(atan(position.y, position.x) * 3.0 - uTime * (0.95 + uEnergy * 0.95));
   }
 `;
 
 const FRAGMENT_SHADER = /* glsl */ `
   uniform float uEnergy;
   uniform float uOnset;
+  uniform float uTransient;
   varying float vLayer;
   varying float vTwinkle;
   varying float vHue;
+  varying float vArm;
 
   vec3 hsb2rgb(in vec3 c) {
     vec3 rgb = clamp(abs(mod(c.x * 6.0 + vec3(0.0,4.0,2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
@@ -57,10 +62,11 @@ const FRAGMENT_SHADER = /* glsl */ `
   void main() {
     vec2 p = gl_PointCoord - 0.5;
     float d = dot(p, p);
-    float halo = smoothstep(0.25, 0.02, d);
-    float core = smoothstep(0.07, 0.0, d);
-    vec3 color = hsb2rgb(vec3(vHue, 0.62 + vLayer * 0.18, 0.42 + vLayer * 0.32 + vTwinkle * 0.18 + uOnset * 0.08));
-    float alpha = halo * (0.035 + vLayer * 0.075 + uEnergy * 0.10) + core * (0.10 + uEnergy * 0.12);
+    float halo = smoothstep(0.18, 0.028, d);
+    float core = smoothstep(0.028, 0.0, d);
+    float flow = 0.72 + vArm * 0.28;
+    vec3 color = hsb2rgb(vec3(vHue, 0.58 + vLayer * 0.16, 0.34 + vLayer * 0.25 + vTwinkle * 0.13 + flow * 0.15 + uOnset * 0.05));
+    float alpha = halo * (0.014 + vLayer * 0.032 + uEnergy * 0.042 + flow * 0.018) + core * (0.052 + uEnergy * 0.035 + uTransient * 0.018);
     gl_FragColor = vec4(color, alpha);
   }
 `;
@@ -69,8 +75,8 @@ type Tier = "eco" | "balanced" | "high";
 
 const tierSettings: Record<Tier, { particles: number; pixelRatio: number }> = {
   eco: { particles: 12000, pixelRatio: 1 },
-  balanced: { particles: 30000, pixelRatio: 1.5 },
-  high: { particles: 52000, pixelRatio: 2 },
+  balanced: { particles: 36000, pixelRatio: 2 },
+  high: { particles: 62000, pixelRatio: 2 },
 };
 
 type MotionState = {
@@ -117,7 +123,7 @@ export class NebulaRenderer {
     this.renderer.setPixelRatio(tierSettings.balanced.pixelRatio);
     this.host.appendChild(this.renderer.domElement);
 
-    this.camera.position.set(0, 0.15, 5.1);
+    this.camera.position.set(0, 0.15, 5.75);
     this.material = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
@@ -190,6 +196,7 @@ export class NebulaRenderer {
     const position = new Float32Array(settings.particles * 3);
     const seed = new Float32Array(settings.particles);
     const layer = new Float32Array(settings.particles);
+    const size = new Float32Array(settings.particles);
 
     for (let index = 0; index < settings.particles; index += 1) {
       const isCore = Math.random() < 0.42;
@@ -202,12 +209,16 @@ export class NebulaRenderer {
       position[index * 3 + 2] = (Math.random() - 0.5) * (isCore ? 0.22 : 0.42) + scatter * 0.7;
       seed[index] = Math.random();
       layer[index] = isCore ? 0.18 + Math.random() * 0.46 : 0.48 + Math.random() * 0.52;
+      // A sparse layer of larger stars gives the field depth without turning
+      // every particle into a blurred bokeh disc.
+      size[index] = Math.random() < 0.085 ? 1.45 + Math.random() * 1.05 : 0.5 + Math.random() * 0.4;
     }
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
     geometry.setAttribute("aSeed", new THREE.BufferAttribute(seed, 1));
     geometry.setAttribute("aLayer", new THREE.BufferAttribute(layer, 1));
+    geometry.setAttribute("aSize", new THREE.BufferAttribute(size, 1));
     this.points = new THREE.Points(geometry, this.material);
     this.scene.add(this.points);
     this.currentTier = tier;
@@ -267,10 +278,10 @@ export class NebulaRenderer {
     uniforms.uIntensity.value = intensity;
     // Keep the spiral face-on and alive: the shader handles orbital rotation,
     // while this adds only a slow spacecraft-like drift through the field.
-    this.points?.rotation.set(Math.sin(elapsed * 0.05) * 0.10, Math.cos(elapsed * 0.04) * 0.08, elapsed * 0.010);
-    const cameraX = Math.sin(elapsed * 0.12) * (0.14 + energy * 0.18);
-    const cameraY = 0.15 + Math.cos(elapsed * 0.09) * (0.07 + energy * 0.12);
-    const cameraZ = 5.1 - energy * 0.58 - transient * 0.12;
+    this.points?.rotation.set(Math.sin(elapsed * 0.08) * 0.12, Math.cos(elapsed * 0.065) * 0.10, elapsed * 0.018);
+    const cameraX = Math.sin(elapsed * 0.20) * (0.18 + energy * 0.22);
+    const cameraY = 0.15 + Math.cos(elapsed * 0.15) * (0.09 + energy * 0.14);
+    const cameraZ = 5.75 - energy * 0.42 - transient * 0.10;
     this.camera.position.x = smoothEnvelope(this.camera.position.x, cameraX, 3.4, 3.4, deltaSeconds);
     this.camera.position.y = smoothEnvelope(this.camera.position.y, cameraY, 3.4, 3.4, deltaSeconds);
     this.camera.position.z = smoothEnvelope(this.camera.position.z, cameraZ, 4.6, 4.6, deltaSeconds);
