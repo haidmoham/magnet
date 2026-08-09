@@ -3,6 +3,7 @@ import type { Preferences, VisualFrame } from "./types";
 
 const VERTEX_SHADER = /* glsl */ `
   attribute float aSeed;
+  attribute float aLayer;
   uniform float uTime;
   uniform float uBass;
   uniform float uMid;
@@ -13,31 +14,38 @@ const VERTEX_SHADER = /* glsl */ `
   uniform float uStereo;
   uniform float uTransient;
   uniform float uIntensity;
-  varying float vGlow;
+  varying float vLayer;
+  varying float vTwinkle;
   varying float vHue;
 
   void main() {
     vec3 position = position;
-    float breathe = 1.0 + uBass * 0.86 * uIntensity + uEnergy * 0.22 + uTransient * 0.20 + sin(uTime * 0.55 + aSeed * 7.0) * 0.025;
-    float orbit = uTime * (0.045 + uEnergy * 0.24 + uTransient * 0.34) + aSeed * 11.0;
-    position.xy = mat2(cos(orbit), -sin(orbit), sin(orbit), cos(orbit)) * position.xy;
-    position += normalize(position + 0.001) * ((uOnset * 0.70 + uTransient * 0.36 + uPeak * 0.09) * sin(aSeed * 37.0));
-    position.x += uStereo * (0.20 + uEnergy * 0.16) * sin(aSeed * 31.0 + uTime);
-    position *= breathe;
+    float layer = aLayer;
+    float spin = uTime * (0.035 + uEnergy * 0.065) + layer * 0.05;
+    position.xy = mat2(cos(spin), -sin(spin), sin(spin), cos(spin)) * position.xy;
+
+    vec2 radial = normalize(position.xy + vec2(0.0001));
+    float breathe = uBass * (0.22 + layer * 0.22) * uIntensity + uEnergy * 0.10 + uTransient * 0.08;
+    float tide = sin(uTime * (0.45 + layer * 0.25) + aSeed * 18.85) * (0.018 + uTreble * 0.05);
+    position.xy += radial * (breathe + tide);
+    position.z += sin(uTime * (0.32 + layer * 0.40) + aSeed * 31.4) * (0.045 + uTreble * 0.10);
+    position.z += uOnset * (0.035 + layer * 0.06) * sin(aSeed * 83.0);
+    position.x += uStereo * 0.07 * sin(aSeed * 29.0 + uTime * 0.7);
+
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-    // Keep the particles legible as particles. Large additive sprites turn the
-    // whole field into a white disk when the foreground is hidden.
-    gl_PointSize = min(26.0, (1.0 + uTreble * 2.1 + uOnset * 3.0 + uPeak * 0.8) * (150.0 / -mvPosition.z));
+    gl_PointSize = min(18.0, (0.8 + layer * 1.6 + uTreble * 1.5 + uTransient * 1.2) * (155.0 / -mvPosition.z));
     gl_Position = projectionMatrix * mvPosition;
-    vGlow = 0.35 + uEnergy * 0.65;
-    vHue = fract(aSeed * 0.23 + uTime * 0.006 + uMid * 0.1);
+    vLayer = layer;
+    vTwinkle = 0.72 + 0.28 * sin(uTime * (1.3 + layer) + aSeed * 74.0);
+    vHue = fract(0.57 + layer * 0.31 + aSeed * 0.08 + uMid * 0.12 + uBass * 0.05);
   }
 `;
 
 const FRAGMENT_SHADER = /* glsl */ `
   uniform float uEnergy;
   uniform float uOnset;
-  varying float vGlow;
+  varying float vLayer;
+  varying float vTwinkle;
   varying float vHue;
 
   vec3 hsb2rgb(in vec3 c) {
@@ -49,10 +57,11 @@ const FRAGMENT_SHADER = /* glsl */ `
   void main() {
     vec2 p = gl_PointCoord - 0.5;
     float d = dot(p, p);
-    float alpha = smoothstep(0.25, 0.0, d);
-    float hue = mix(0.57, 0.91, vHue);
-    vec3 color = hsb2rgb(vec3(hue, 0.68, 0.40 + vGlow * 0.25 + uOnset * 0.05));
-    gl_FragColor = vec4(color, alpha * (0.06 + uEnergy * 0.18));
+    float halo = smoothstep(0.25, 0.02, d);
+    float core = smoothstep(0.07, 0.0, d);
+    vec3 color = hsb2rgb(vec3(vHue, 0.62 + vLayer * 0.18, 0.42 + vLayer * 0.32 + vTwinkle * 0.18 + uOnset * 0.08));
+    float alpha = halo * (0.035 + vLayer * 0.075 + uEnergy * 0.10) + core * (0.10 + uEnergy * 0.12);
+    gl_FragColor = vec4(color, alpha);
   }
 `;
 
@@ -63,6 +72,22 @@ const tierSettings: Record<Tier, { particles: number; pixelRatio: number }> = {
   balanced: { particles: 30000, pixelRatio: 1.5 },
   high: { particles: 52000, pixelRatio: 2 },
 };
+
+type MotionState = {
+  bass: number;
+  mid: number;
+  treble: number;
+  energy: number;
+  peak: number;
+  onset: number;
+  stereo: number;
+  transient: number;
+};
+
+function smoothEnvelope(current: number, target: number, attack: number, release: number, deltaSeconds: number): number {
+  const rate = target > current ? attack : release;
+  return current + (target - current) * (1 - Math.exp(-rate * deltaSeconds));
+}
 
 export class NebulaRenderer {
   private readonly renderer: THREE.WebGLRenderer;
@@ -78,7 +103,12 @@ export class NebulaRenderer {
   private qualityCooldownUntil = performance.now() + 7000;
   private rollingFrameMs = 16.7;
   private lastFrameAt = performance.now();
-  private lastEnergy = 0;
+  private lastIdleRenderAt = 0;
+  private lastInputTimestamp = 0;
+  private lastInputEnergy = 0;
+  private lastPulseAt = 0;
+  private pendingPulse = 0;
+  private motion: MotionState = { bass: 0, mid: 0, treble: 0, energy: 0, peak: 0, onset: 0, stereo: 0, transient: 0 };
   private resizeObserver: ResizeObserver;
 
   constructor(private readonly host: HTMLElement) {
@@ -91,9 +121,10 @@ export class NebulaRenderer {
     this.material = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
-      // Normal alpha blending preserves the individual purple/blue particles
-      // instead of adding 30k overlapping sprites up to white.
-      blending: THREE.NormalBlending,
+      // The field stays dim enough to retain individual stars, while additive
+      // blending lets overlapping arms create a genuine nebula glow.
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
       uniforms: {
         uTime: { value: 0 },
         uBass: { value: 0 },
@@ -118,6 +149,18 @@ export class NebulaRenderer {
   }
 
   setFrame(frame: VisualFrame): void {
+    if (frame.timestampMs > this.lastInputTimestamp) {
+      const energyRise = Math.max(0, frame.energy - this.lastInputEnergy);
+      const onset = Math.max(0, frame.onset - 0.08) / 0.92;
+      // Match VoidPulse's refractory approach: reserve the largest visual pulse
+      // for a distinct hit instead of retriggering on every analysis update.
+      if (!frame.silence && onset > 0.08 && frame.timestampMs - this.lastPulseAt >= 110) {
+        this.pendingPulse = Math.max(this.pendingPulse, Math.min(0.82, onset * 0.62 + energyRise * 0.54));
+        this.lastPulseAt = frame.timestampMs;
+      }
+      this.lastInputTimestamp = frame.timestampMs;
+      this.lastInputEnergy = frame.energy;
+    }
     this.frame = frame;
   }
 
@@ -146,21 +189,25 @@ export class NebulaRenderer {
     const settings = tierSettings[tier];
     const position = new Float32Array(settings.particles * 3);
     const seed = new Float32Array(settings.particles);
+    const layer = new Float32Array(settings.particles);
 
     for (let index = 0; index < settings.particles; index += 1) {
-      const radius = 0.35 + Math.pow(Math.random(), 0.46) * 1.65;
-      const theta = Math.random() * Math.PI * 2;
-      const phi = Math.acos(2 * Math.random() - 1);
-      const drift = (Math.random() - 0.5) * 0.18;
-      position[index * 3] = Math.sin(phi) * Math.cos(theta) * radius + drift;
-      position[index * 3 + 1] = Math.cos(phi) * radius * 0.72 + drift;
-      position[index * 3 + 2] = Math.sin(phi) * Math.sin(theta) * radius + drift;
+      const isCore = Math.random() < 0.42;
+      const radius = isCore ? 0.06 + Math.pow(Math.random(), 1.7) * 0.78 : 0.42 + Math.pow(Math.random(), 0.62) * 2.35;
+      const arm = Math.floor(Math.random() * 3);
+      const theta = arm * (Math.PI * 2 / 3) + radius * 2.35 + (Math.random() - 0.5) * (0.24 + radius * 0.18);
+      const scatter = (Math.random() - 0.5) * (0.025 + radius * 0.13);
+      position[index * 3] = Math.cos(theta) * radius + scatter;
+      position[index * 3 + 1] = Math.sin(theta) * radius * 0.72 + scatter;
+      position[index * 3 + 2] = (Math.random() - 0.5) * (isCore ? 0.22 : 0.42) + scatter * 0.7;
       seed[index] = Math.random();
+      layer[index] = isCore ? 0.18 + Math.random() * 0.46 : 0.48 + Math.random() * 0.52;
     }
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
     geometry.setAttribute("aSeed", new THREE.BufferAttribute(seed, 1));
+    geometry.setAttribute("aLayer", new THREE.BufferAttribute(layer, 1));
     this.points = new THREE.Points(geometry, this.material);
     this.scene.add(this.points);
     this.currentTier = tier;
@@ -182,45 +229,64 @@ export class NebulaRenderer {
 
   private render(): void {
     const now = performance.now();
-    const delta = now - this.lastFrameAt;
+    const delta = Math.min(now - this.lastFrameAt, 100);
     this.lastFrameAt = now;
     this.rollingFrameMs = this.rollingFrameMs * 0.92 + delta * 0.08;
     const shouldIdle = document.hidden || this.lowPower || this.frame.silence;
-    if (shouldIdle && now % 66 > 17) return;
+    if (shouldIdle && now - this.lastIdleRenderAt < 66) return;
+    if (shouldIdle) this.lastIdleRenderAt = now;
 
     if (this.preferences.quality === "auto") this.adaptQuality();
     if (!this.preferences.visualsEnabled) return;
 
+    const deltaSeconds = delta / 1000;
     const elapsed = this.clock.getElapsedTime();
     const intensity = this.preferences.intensity === "calm" ? 0.52 : this.preferences.intensity === "high" ? 1.34 : 1;
-    const energy = this.frame.silence ? 0.02 : this.frame.energy;
-    const energyDelta = Math.max(0, energy - this.lastEnergy);
-    const transient = this.frame.silence ? 0 : Math.min(1, this.frame.onset * 1.35 + energyDelta * 3.5);
-    this.lastEnergy = energy;
+    const targetEnergy = this.frame.silence ? 0.02 : this.frame.energy;
+    this.motion.bass = smoothEnvelope(this.motion.bass, this.frame.bass, 15, 4.2, deltaSeconds);
+    this.motion.mid = smoothEnvelope(this.motion.mid, this.frame.mid, 12, 4.8, deltaSeconds);
+    this.motion.treble = smoothEnvelope(this.motion.treble, this.frame.treble, 10, 5.5, deltaSeconds);
+    this.motion.energy = smoothEnvelope(this.motion.energy, targetEnergy, 11, 3.6, deltaSeconds);
+    this.motion.peak = smoothEnvelope(this.motion.peak, this.frame.peak ?? targetEnergy, 14, 5.2, deltaSeconds);
+    this.motion.onset = smoothEnvelope(this.motion.onset, this.frame.silence ? 0 : this.frame.onset, 16, 8.5, deltaSeconds);
+    this.motion.stereo = smoothEnvelope(this.motion.stereo, this.frame.stereo, 7, 3.2, deltaSeconds);
+    this.motion.transient = Math.max(this.motion.transient * Math.exp(-deltaSeconds * 7.2), this.pendingPulse);
+    this.pendingPulse = 0;
+
+    const { bass, mid, treble, energy, peak, onset, stereo, transient } = this.motion;
     const uniforms = this.material.uniforms;
     uniforms.uTime.value = elapsed;
-    uniforms.uBass.value += (this.frame.bass - uniforms.uBass.value) * 0.28;
-    uniforms.uMid.value += (this.frame.mid - uniforms.uMid.value) * 0.24;
-    uniforms.uTreble.value += (this.frame.treble - uniforms.uTreble.value) * 0.32;
-    uniforms.uEnergy.value += (energy - uniforms.uEnergy.value) * 0.22;
-    uniforms.uPeak.value += ((this.frame.peak ?? energy) - uniforms.uPeak.value) * 0.4;
-    uniforms.uOnset.value += (this.frame.onset - uniforms.uOnset.value) * 0.42;
-    uniforms.uStereo.value += (this.frame.stereo - uniforms.uStereo.value) * 0.16;
-    uniforms.uTransient.value += (transient - uniforms.uTransient.value) * 0.5;
+    uniforms.uBass.value = bass;
+    uniforms.uMid.value = mid;
+    uniforms.uTreble.value = treble;
+    uniforms.uEnergy.value = energy;
+    uniforms.uPeak.value = peak;
+    uniforms.uOnset.value = onset;
+    uniforms.uStereo.value = stereo;
+    uniforms.uTransient.value = transient;
     uniforms.uIntensity.value = intensity;
-    this.points?.rotation.set(elapsed * 0.028, elapsed * 0.043, elapsed * 0.012);
-    this.camera.position.x = Math.sin(elapsed * 0.12) * (0.16 + energy * 0.20);
-    this.camera.position.y = 0.15 + Math.cos(elapsed * 0.09) * (0.08 + energy * 0.12);
-    this.camera.position.z = 5.1 - energy * 0.72 - transient * 0.18;
+    // Keep the spiral face-on and alive: the shader handles orbital rotation,
+    // while this adds only a slow spacecraft-like drift through the field.
+    this.points?.rotation.set(Math.sin(elapsed * 0.05) * 0.10, Math.cos(elapsed * 0.04) * 0.08, elapsed * 0.010);
+    const cameraX = Math.sin(elapsed * 0.12) * (0.14 + energy * 0.18);
+    const cameraY = 0.15 + Math.cos(elapsed * 0.09) * (0.07 + energy * 0.12);
+    const cameraZ = 5.1 - energy * 0.58 - transient * 0.12;
+    this.camera.position.x = smoothEnvelope(this.camera.position.x, cameraX, 3.4, 3.4, deltaSeconds);
+    this.camera.position.y = smoothEnvelope(this.camera.position.y, cameraY, 3.4, 3.4, deltaSeconds);
+    this.camera.position.z = smoothEnvelope(this.camera.position.z, cameraZ, 4.6, 4.6, deltaSeconds);
     this.camera.lookAt(0, 0, 0);
     this.renderer.render(this.scene, this.camera);
   }
 
   private adaptQuality(): void {
     const now = performance.now();
+    if (now < this.qualityCooldownUntil) return;
     if (this.rollingFrameMs > 22 && this.currentTier !== "eco") {
       this.replacePoints(this.currentTier === "high" ? "balanced" : "eco");
-      this.qualityCooldownUntil = now + 4000;
+      // Rebuilding a particle buffer is visible work. Never do two tier drops
+      // back-to-back because a brief hitch should not cause another hitch.
+      this.qualityCooldownUntil = now + 6000;
+      return;
     }
     // Auto is intentionally capped at balanced. The player should never trade
     // basic transport responsiveness for a barely-visible density bump behind
