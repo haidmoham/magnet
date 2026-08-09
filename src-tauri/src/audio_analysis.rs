@@ -1,4 +1,4 @@
-//! Non-blocking PCM analysis for the VoidPulse renderer.
+//! Non-blocking PCM analysis for the Magnet renderer.
 //!
 //! [`AudioAnalysisInput::push_interleaved`] is the only method intended for an
 //! audio callback. It copies complete PCM frames into a bounded, preallocated
@@ -211,7 +211,7 @@ where
     let worker_stop = Arc::clone(&stop);
 
     let worker = thread::Builder::new()
-        .name("voidpulse-pcm-analysis".into())
+        .name("magnet-pcm-analysis".into())
         .spawn(move || {
             analyzer_loop(config, worker_queue, worker_stop, on_frame);
         })

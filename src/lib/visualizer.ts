@@ -158,7 +158,7 @@ export class NebulaRenderer {
     if (frame.timestampMs > this.lastInputTimestamp) {
       const energyRise = Math.max(0, frame.energy - this.lastInputEnergy);
       const onset = Math.max(0, frame.onset - 0.08) / 0.92;
-      // Match VoidPulse's refractory approach: reserve the largest visual pulse
+      // Use a refractory period: reserve the largest visual pulse
       // for a distinct hit instead of retriggering on every analysis update.
       if (!frame.silence && onset > 0.08 && frame.timestampMs - this.lastPulseAt >= 110) {
         this.pendingPulse = Math.max(this.pendingPulse, Math.min(0.82, onset * 0.62 + energyRise * 0.54));
