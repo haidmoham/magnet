@@ -11,6 +11,26 @@ export interface Track {
   saved?: boolean;
 }
 
+export interface Playlist {
+  id: string;
+  name: string;
+  owner: string;
+  trackCount: number;
+}
+
+export interface QueueEntry {
+  queueId: string;
+  track: Track;
+}
+
+export type SearchKind = "tracks" | "playlists";
+
+export interface SearchPage<T extends Track | Playlist> {
+  requestId: string;
+  items: T[];
+  nextCursor: string | null;
+}
+
 export interface PlaybackState {
   track: Track | null;
   positionMs: number;
@@ -21,9 +41,11 @@ export interface PlaybackState {
 }
 
 export interface AppSnapshot {
+  revision: number;
   view: ViewId;
   library: Track[];
-  queue: Track[];
+  playlists: Playlist[];
+  queue: QueueEntry[];
   playback: PlaybackState;
   authenticated: boolean;
   spotifyConfigured: boolean;
@@ -36,19 +58,28 @@ export interface VisualFrame {
   mid: number;
   treble: number;
   energy: number;
+  peak?: number;
   onset: number;
+  spectrum?: number[];
   stereo: number;
   silence: boolean;
 }
 
 export interface Preferences {
   visualsEnabled: boolean;
+  foregroundHidden: boolean;
   intensity: VisualIntensity;
   quality: VisualQuality;
 }
 
+export interface SpotifyAuthResult {
+  authenticated: boolean;
+  message: string;
+}
+
 export type PlayerAction =
-  | { type: "play_track"; trackId: string }
+  | { type: "play_track"; trackId: string; track?: Track }
+  | { type: "play_playlist"; playlistId: string }
   | { type: "toggle_playback" }
   | { type: "next" }
   | { type: "previous" }
@@ -56,6 +87,8 @@ export type PlayerAction =
   | { type: "set_volume"; volume: number }
   | { type: "toggle_shuffle" }
   | { type: "cycle_repeat" }
-  | { type: "enqueue"; trackId: string }
+  | { type: "enqueue"; trackId: string; track?: Track }
+  | { type: "move_queue_item"; queueId: string; toIndex: number }
+  | { type: "remove_queue_item"; queueId: string }
+  | { type: "clear_queue" }
   | { type: "set_view"; view: ViewId };
-

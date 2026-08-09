@@ -17,6 +17,12 @@ npm run tauri dev
 
 - The existing VoidPulse website is not a dependency.
 - Visual controls are intentionally limited to visuals, intensity, and quality.
+- The physics-inspired visual layer is an intentional performance tradeoff: it
+  must respond to decoded audio, retain a wallpaper-backed static end state,
+  and never be used to excuse sluggish interaction.
+- New product scope stays atomic and deliberate. Prefer a specific music-player
+  capability that earns its place in the keyboard-forward flow over broad
+  preference surfaces or feature accumulation.
 - Playback must use a dedicated Spotify app identity and a Premium account.
 - No analytics or remote telemetry are included.
 

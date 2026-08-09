@@ -21,14 +21,17 @@ export const demoTracks: Track[] = [
 
 export const demoPreferences: Preferences = {
   visualsEnabled: true,
+  foregroundHidden: false,
   intensity: "standard",
   quality: "auto",
 };
 
 export const demoSnapshot: AppSnapshot = {
+  revision: 0,
   view: "library",
   library: demoTracks,
-  queue: demoTracks.slice(0, 6),
+  playlists: [],
+  queue: demoTracks.slice(0, 6).map((track, index) => ({ queueId: `demo-${index + 1}`, track })),
   playback: {
     track: demoTracks[0],
     positionMs: 194000,
@@ -55,4 +58,3 @@ export function demoVisualFrame(now: number): VisualFrame {
     silence: false,
   };
 }
-

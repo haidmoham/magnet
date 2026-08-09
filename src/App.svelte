@@ -3,12 +3,27 @@
   import { bridge } from "./lib/bridge";
   import { demoPreferences, demoSnapshot, demoVisualFrame } from "./lib/demo";
   import { duration, percent } from "./lib/format";
-  import type { AppSnapshot, PlayerAction, Preferences, Track, ViewId, VisualIntensity, VisualQuality } from "./lib/types";
+  import type { AppSnapshot, PlayerAction, Playlist, Preferences, SearchKind, Track, ViewId, VisualFrame, VisualIntensity, VisualQuality } from "./lib/types";
 
   let snapshot: AppSnapshot = demoSnapshot;
   let preferences: Preferences = demoPreferences;
   let selectedId = demoSnapshot.playback.track?.id ?? demoSnapshot.library[0]?.id ?? "";
   let query = "";
+  let searchKind: SearchKind = "tracks";
+  let searchTracks: Track[] = [];
+  let searchPlaylists: Playlist[] = [];
+  let searchCursors: Record<SearchKind, string | null> = { tracks: null, playlists: null };
+  let searchPending = false;
+  let searchError: string | null = null;
+  let searchTimer: ReturnType<typeof setTimeout> | null = null;
+  let searchRevision = 0;
+  let openedPlaylist: Playlist | null = null;
+  let openedPlaylistTracks: Track[] = [];
+  let playlistOpening = false;
+  let playlistOpenError: string | null = null;
+  let playlistOpenTimer: ReturnType<typeof setTimeout> | null = null;
+  let selectedQueueId = demoSnapshot.queue[0]?.queueId ?? "";
+  let draggedQueueId = "";
   let commandOpen = false;
   let commandText = "";
   let settingsOpen = false;
@@ -16,16 +31,92 @@
   let rendererHost: HTMLDivElement;
   let renderer: import("./lib/visualizer").NebulaRenderer | null = null;
   let statusMessage = snapshot.message;
+  let visualFrame: VisualFrame = demoVisualFrame(0);
+  let interactionRevision = 0;
+  let volumeCommit: ReturnType<typeof setTimeout> | null = null;
+  let seeking = false;
 
-  $: trackRows = snapshot.view === "queue" ? snapshot.queue : snapshot.library;
-  $: visibleTracks = query.trim()
+  $: playlistDetailActive = snapshot.view === "browse" && openedPlaylist !== null;
+  $: showingPlaylists = !playlistDetailActive && (snapshot.view === "browse" || (snapshot.view === "search" && searchKind === "playlists"));
+  $: trackRows = snapshot.view === "queue" ? snapshot.queue.map((entry) => entry.track) : snapshot.view === "search" ? searchTracks : playlistDetailActive ? openedPlaylistTracks : snapshot.view === "browse" ? [] : snapshot.library;
+  $: visibleTracks = snapshot.view !== "search" && query.trim()
     ? trackRows.filter((track) => `${track.title} ${track.artists.join(" ")} ${track.album}`.toLowerCase().includes(query.toLowerCase()))
     : trackRows;
+  $: visiblePlaylists = snapshot.view === "search" ? searchPlaylists : snapshot.playlists;
   $: current = snapshot.playback.track;
   $: progress = current ? Math.min(1, snapshot.playback.positionMs / current.durationMs) : 0;
+  $: spectrumBars = makeSpectrumBars(visualFrame);
+  $: if (snapshot.view === "search") scheduleSpotifySearch(query, searchKind);
+
+  function makeSpectrumBars(frame: VisualFrame): number[] {
+    if (frame.spectrum?.length) {
+      return Array.from({ length: 48 }, (_, index) => Math.max(0.012, Math.min(1, frame.spectrum?.[index] ?? 0)));
+    }
+    return Array.from({ length: 48 }, (_, index) => {
+      const position = index / 47;
+      const band = position < 0.3 ? frame.bass : position < 0.7 ? frame.mid : frame.treble;
+      return Math.max(0.012, Math.min(1, band + frame.energy * 0.12));
+    });
+  }
 
   function selectedIndex(): number {
     return Math.max(0, visibleTracks.findIndex((track) => track.id === selectedId));
+  }
+
+  function selectedQueueIndex(): number {
+    return Math.max(0, snapshot.queue.findIndex((entry) => entry.queueId === selectedQueueId));
+  }
+
+  function scheduleSpotifySearch(value: string, kind: SearchKind): void {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = null;
+    const normalized = value.trim();
+    const revision = ++searchRevision;
+    if (!normalized) {
+      searchTracks = [];
+      searchPlaylists = [];
+      searchCursors = { tracks: null, playlists: null };
+      searchPending = false;
+      searchError = null;
+      return;
+    }
+    searchTimer = setTimeout(() => {
+      searchTimer = null;
+      void searchSpotify(normalized, kind, false, revision);
+    }, 200);
+  }
+
+  async function searchSpotify(value: string, kind: SearchKind, append: boolean, requestedRevision = searchRevision): Promise<void> {
+    const revision = append ? searchRevision : requestedRevision;
+    searchPending = true;
+    searchError = null;
+    try {
+      if (!bridge.isTauri) {
+        const normalized = value.toLowerCase();
+        if (kind === "tracks") searchTracks = demoSnapshot.library.filter((track) => `${track.title} ${track.artists.join(" ")} ${track.album}`.toLowerCase().includes(normalized));
+        else searchPlaylists = [];
+        searchCursors = { ...searchCursors, [kind]: null };
+        return;
+      }
+      const page = kind === "tracks"
+        ? await bridge.searchSpotify<Track>(value, kind, append ? searchCursors[kind] ?? undefined : undefined)
+        : await bridge.searchSpotify<Playlist>(value, kind, append ? searchCursors[kind] ?? undefined : undefined);
+      if (revision !== searchRevision || value !== query.trim() || kind !== searchKind) return;
+      if (kind === "tracks") searchTracks = mergeSearchItems(searchTracks, page.items as Track[], append);
+      else searchPlaylists = mergeSearchItems(searchPlaylists, page.items as Playlist[], append);
+      searchCursors = { ...searchCursors, [kind]: page.nextCursor };
+    } catch (error) {
+      if (revision === searchRevision) searchError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (revision === searchRevision) searchPending = false;
+    }
+  }
+
+  function mergeSearchItems<T extends { id: string }>(existing: T[], incoming: T[], append: boolean): T[] {
+    if (!append) return incoming;
+    const merged = new Map(existing.map((item) => [item.id, item]));
+    for (const item of incoming) merged.set(item.id, item);
+    return [...merged.values()];
   }
 
   async function refresh(): Promise<void> {
@@ -40,18 +131,66 @@
     }
   }
 
-  async function dispatch(action: PlayerAction): Promise<void> {
+  function interactionMessage(action: PlayerAction, next: AppSnapshot): string | null {
+    if (action.type === "toggle_playback") return next.playback.playing ? "Resuming…" : "Pausing…";
+    if (action.type === "next") return "Next track…";
+    if (action.type === "previous") return "Previous track…";
+    if (action.type === "play_track") return next.playback.track ? `Playing ${next.playback.track.title}…` : "Loading track…";
+    if (action.type === "play_playlist") return "Starting playlist…";
+    return null;
+  }
+
+  async function dispatch(action: PlayerAction, options: { optimistic?: boolean; quiet?: boolean } = {}): Promise<void> {
     if (!bridge.isTauri) {
       snapshot = applyDemoAction(snapshot, action);
       selectedId = snapshot.playback.track?.id ?? selectedId;
       return;
     }
-    try {
-      snapshot = await bridge.dispatch(action);
-      statusMessage = snapshot.message;
-    } catch (error) {
-      statusMessage = error instanceof Error ? error.message : String(error);
+    const revision = ++interactionRevision;
+    const previous = snapshot;
+    const optimistic = options.optimistic !== false;
+    if (optimistic) {
+      snapshot = applyDemoAction(snapshot, action);
+      selectedId = snapshot.playback.track?.id ?? selectedId;
+      if (!options.quiet) statusMessage = interactionMessage(action, snapshot) ?? statusMessage;
     }
+    try {
+      const confirmed = await bridge.dispatch(action);
+      if (revision === interactionRevision) {
+        snapshot = confirmed;
+        if (!options.quiet && confirmed.message) statusMessage = confirmed.message;
+      }
+    } catch (error) {
+      if (revision === interactionRevision) {
+        snapshot = previous;
+        statusMessage = error instanceof Error ? error.message : String(error);
+      }
+    }
+  }
+
+  function previewSeek(positionMs: number): void {
+    seeking = true;
+    snapshot = { ...snapshot, playback: { ...snapshot.playback, positionMs } };
+  }
+
+  function commitSeek(positionMs: number): void {
+    seeking = false;
+    void dispatch({ type: "seek", positionMs }, { optimistic: false, quiet: true });
+  }
+
+  function previewVolume(volume: number): void {
+    snapshot = { ...snapshot, playback: { ...snapshot.playback, volume } };
+    if (volumeCommit) clearTimeout(volumeCommit);
+    volumeCommit = setTimeout(() => {
+      volumeCommit = null;
+      void dispatch({ type: "set_volume", volume }, { optimistic: false, quiet: true });
+    }, 55);
+  }
+
+  function commitVolume(volume: number): void {
+    if (volumeCommit) clearTimeout(volumeCommit);
+    volumeCommit = null;
+    void dispatch({ type: "set_volume", volume }, { optimistic: false, quiet: true });
   }
 
   function applyDemoAction(state: AppSnapshot, action: PlayerAction): AppSnapshot {
@@ -60,6 +199,7 @@
       const track = state.library.find((item) => item.id === action.trackId) ?? null;
       return { ...state, playback: { ...state.playback, track, positionMs: 0, playing: true } };
     }
+    if (action.type === "play_playlist") return state;
     if (action.type === "toggle_playback") return { ...state, playback: { ...state.playback, playing: !state.playback.playing } };
     if (action.type === "set_volume") return { ...state, playback: { ...state.playback, volume: action.volume } };
     if (action.type === "seek") return { ...state, playback: { ...state.playback, positionMs: action.positionMs } };
@@ -76,8 +216,20 @@
     }
     if (action.type === "enqueue") {
       const track = state.library.find((item) => item.id === action.trackId);
-      return track ? { ...state, queue: [...state.queue, track] } : state;
+      return track ? { ...state, queue: [...state.queue, { queueId: `demo-${Date.now()}-${state.queue.length}`, track }] } : state;
     }
+    if (action.type === "move_queue_item") {
+      const fromIndex = state.queue.findIndex((entry) => entry.queueId === action.queueId);
+      if (fromIndex < 0 || action.toIndex < 0 || action.toIndex >= state.queue.length) return state;
+      const queue = [...state.queue];
+      const [entry] = queue.splice(fromIndex, 1);
+      queue.splice(action.toIndex, 0, entry);
+      return { ...state, queue };
+    }
+    if (action.type === "remove_queue_item") {
+      return { ...state, queue: state.queue.filter((entry) => entry.queueId !== action.queueId) };
+    }
+    if (action.type === "clear_queue") return { ...state, queue: [] };
     return state;
   }
 
@@ -91,6 +243,21 @@
         statusMessage = error instanceof Error ? error.message : String(error);
       }
     }
+  }
+
+  function enterVisualMode(): void {
+    settingsOpen = false;
+    commandOpen = false;
+    void setPreferences({ ...preferences, foregroundHidden: true });
+  }
+
+  function exitVisualMode(): void {
+    void setPreferences({ ...preferences, foregroundHidden: false });
+  }
+
+  function selectVisualSource(visualsEnabled: boolean): void {
+    if (preferences.visualsEnabled === visualsEnabled) return;
+    void setPreferences({ ...preferences, visualsEnabled });
   }
 
   async function login(): Promise<void> {
@@ -121,10 +288,72 @@
 
   function activate(track: Track): void {
     selectedId = track.id;
-    void dispatch({ type: "play_track", trackId: track.id });
+    void dispatch({ type: "play_track", trackId: track.id, track });
+  }
+
+  function activatePlaylist(playlist: Playlist): void {
+    void dispatch({ type: "play_playlist", playlistId: playlist.id });
+    statusMessage = `Starting ${playlist.name}`;
+  }
+
+  function schedulePlaylistOpen(playlist: Playlist): void {
+    if (playlistOpenTimer) clearTimeout(playlistOpenTimer);
+    playlistOpenTimer = setTimeout(() => {
+      playlistOpenTimer = null;
+      void openPlaylist(playlist);
+    }, 180);
+  }
+
+  async function openPlaylist(playlist: Playlist): Promise<void> {
+    playlistOpening = true;
+    playlistOpenError = null;
+    openedPlaylist = playlist;
+    openedPlaylistTracks = [];
+    query = "";
+    try {
+      if (!bridge.isTauri) {
+        openedPlaylistTracks = demoSnapshot.library;
+        return;
+      }
+      openedPlaylistTracks = await bridge.playlistTracks(playlist.id);
+    } catch (error) {
+      playlistOpenError = error instanceof Error ? error.message : String(error);
+    } finally {
+      playlistOpening = false;
+    }
+  }
+
+  function closePlaylist(): void {
+    if (playlistOpenTimer) clearTimeout(playlistOpenTimer);
+    playlistOpenTimer = null;
+    openedPlaylist = null;
+    openedPlaylistTracks = [];
+    playlistOpenError = null;
+    query = "";
+  }
+
+  function moveQueueItem(queueId: string, toIndex: number): void {
+    if (toIndex < 0 || toIndex >= snapshot.queue.length) return;
+    selectedQueueId = queueId;
+    void dispatch({ type: "move_queue_item", queueId, toIndex });
+  }
+
+  function removeQueueItem(queueId: string): void {
+    const index = snapshot.queue.findIndex((entry) => entry.queueId === queueId);
+    const fallback = snapshot.queue[index + 1] ?? snapshot.queue[index - 1];
+    selectedQueueId = fallback?.queueId ?? "";
+    void dispatch({ type: "remove_queue_item", queueId });
+  }
+
+  function dropQueueItem(event: DragEvent, toIndex: number): void {
+    event.preventDefault();
+    const queueId = event.dataTransfer?.getData("text/plain") || draggedQueueId;
+    draggedQueueId = "";
+    if (queueId) moveQueueItem(queueId, toIndex);
   }
 
   function openView(view: ViewId): void {
+    closePlaylist();
     query = "";
     void dispatch({ type: "set_view", view });
   }
@@ -159,20 +388,41 @@
     if (event.key === "F1") { event.preventDefault(); openView("queue"); return; }
     if (event.key === "F2") { event.preventDefault(); openView("search"); return; }
     if (event.key === "F3") { event.preventDefault(); openView("library"); return; }
+    if (snapshot.view === "queue" && event.altKey && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault();
+      const index = selectedQueueIndex();
+      moveQueueItem(selectedQueueId, event.key === "ArrowDown" ? index + 1 : index - 1);
+      return;
+    }
+    if (snapshot.view === "queue" && event.key === "Delete") {
+      event.preventDefault();
+      if (selectedQueueId) removeQueueItem(selectedQueueId);
+      return;
+    }
     if (event.key === "ArrowDown" || event.key.toLowerCase() === "j") {
       event.preventDefault();
-      const next = visibleTracks[Math.min(selectedIndex() + 1, visibleTracks.length - 1)];
-      if (next) selectedId = next.id;
+      if (snapshot.view === "queue") {
+        const next = snapshot.queue[Math.min(selectedQueueIndex() + 1, snapshot.queue.length - 1)];
+        if (next) { selectedQueueId = next.queueId; selectedId = next.track.id; }
+      } else {
+        const next = visibleTracks[Math.min(selectedIndex() + 1, visibleTracks.length - 1)];
+        if (next) selectedId = next.id;
+      }
       return;
     }
     if (event.key === "ArrowUp" || event.key.toLowerCase() === "k") {
       event.preventDefault();
-      const previous = visibleTracks[Math.max(selectedIndex() - 1, 0)];
-      if (previous) selectedId = previous.id;
+      if (snapshot.view === "queue") {
+        const previous = snapshot.queue[Math.max(selectedQueueIndex() - 1, 0)];
+        if (previous) { selectedQueueId = previous.queueId; selectedId = previous.track.id; }
+      } else {
+        const previous = visibleTracks[Math.max(selectedIndex() - 1, 0)];
+        if (previous) selectedId = previous.id;
+      }
       return;
     }
     if (event.key === "Enter") {
-      const selected = visibleTracks[selectedIndex()];
+      const selected = snapshot.view === "queue" ? snapshot.queue[selectedQueueIndex()]?.track : visibleTracks[selectedIndex()];
       if (selected) activate(selected);
     }
   }
@@ -191,17 +441,46 @@
 
   onMount(() => {
     let stopDemo = 0;
+    const playheadTimer = window.setInterval(() => {
+      const track = snapshot.playback.track;
+      if (!bridge.isTauri && !seeking && track && snapshot.playback.playing) {
+        snapshot = {
+          ...snapshot,
+          playback: {
+            ...snapshot.playback,
+            positionMs: Math.min(track.durationMs, snapshot.playback.positionMs + 250),
+          },
+        };
+      }
+    }, 250);
     let unlisten: (() => void) | null = null;
+    let unlistenAuth: (() => void) | null = null;
+    let unlistenPlayer: (() => void) | null = null;
 
     void (async () => {
       const { NebulaRenderer } = await import("./lib/visualizer");
       renderer = new NebulaRenderer(rendererHost);
       renderer.setPreferences(preferences);
       await refresh();
-      unlisten = await bridge.onVisualFrame((frame) => renderer?.setFrame(frame));
+      unlisten = await bridge.onVisualFrame((frame) => {
+        visualFrame = frame;
+        renderer?.setFrame(frame);
+      });
+      unlistenAuth = await bridge.onSpotifyAuth((result) => {
+        statusMessage = result.message;
+        void refresh();
+      });
+      unlistenPlayer = await bridge.onPlayerState((next) => {
+        if (next.revision >= snapshot.revision) {
+          snapshot = next;
+          selectedId = next.playback.track?.id ?? selectedId;
+          if (!seeking && next.message) statusMessage = next.message;
+        }
+      });
       if (!bridge.isTauri) {
         const tick = () => {
-          renderer?.setFrame(demoVisualFrame(performance.now()));
+          visualFrame = demoVisualFrame(performance.now());
+          renderer?.setFrame(visualFrame);
           stopDemo = requestAnimationFrame(tick);
         };
         stopDemo = requestAnimationFrame(tick);
@@ -210,7 +489,12 @@
 
     return () => {
       cancelAnimationFrame(stopDemo);
+      window.clearInterval(playheadTimer);
+      if (volumeCommit) clearTimeout(volumeCommit);
+      if (searchTimer) clearTimeout(searchTimer);
       unlisten?.();
+      unlistenAuth?.();
+      unlistenPlayer?.();
       renderer?.dispose();
     };
   });
@@ -218,9 +502,19 @@
 
 <svelte:window on:keydown={keydown} />
 
-<main class:visuals-off={!preferences.visualsEnabled}>
+<main class:visuals-off={!preferences.visualsEnabled} class:foreground-hidden={preferences.foregroundHidden}>
   <div class="nebula" bind:this={rendererHost} aria-hidden="true"></div>
   <div class="vignette" aria-hidden="true"></div>
+  {#if !preferences.visualsEnabled}
+    <div class="frequency-overlay" role="img" aria-label="Frequency histogram">
+      <span class="frequency-label">frequency</span>
+      <div class="frequency-bars" aria-hidden="true">
+        {#each spectrumBars as bar}
+          <span class="frequency-bar" style={`height: ${Math.round(bar * 100)}%`}></span>
+        {/each}
+      </div>
+    </div>
+  {/if}
 
   <section class="shell" aria-label="Magnet Player">
     <header class="titlebar" data-tauri-drag-region>
@@ -229,6 +523,7 @@
         <span class:online={snapshot.authenticated} class="connection-dot"></span>
         {snapshot.authenticated ? "spotify connected" : "offline library"}
       </div>
+      <button class="visual-mode-button" aria-label="Enter visual mode" on:click={enterVisualMode}>focus visual</button>
       <button class="icon-button settings-button" aria-label="Open visual preferences" on:click={() => settingsOpen = !settingsOpen}>◌</button>
     </header>
 
@@ -240,19 +535,87 @@
       <div class="nav-spacer"></div>
       <label class="search-field">
         <span>/</span>
-        <input id="search" bind:value={query} placeholder="filter or search" aria-label="Filter current list" />
+        <input id="search" bind:value={query} placeholder={snapshot.view === "search" ? "search spotify" : "filter current list"} aria-label={snapshot.view === "search" ? "Search Spotify" : "Filter current list"} />
       </label>
     </div>
 
     <div class="view-title">
       <div>
         <span class="eyebrow">{snapshot.view}</span>
-        <h1>{snapshot.view === "queue" ? "Playing queue" : snapshot.view === "search" ? "Search Spotify" : "Your library"}</h1>
+        <h1>{snapshot.view === "queue" ? "Playing queue" : snapshot.view === "search" ? "Search Spotify" : playlistDetailActive ? openedPlaylist?.name : snapshot.view === "browse" ? "Your playlists" : "Your library"}</h1>
       </div>
-      <div class="view-meta">{visibleTracks.length} tracks · {duration(visibleTracks.reduce((sum, track) => sum + track.durationMs, 0))}</div>
+      <div class="view-actions">
+        {#if snapshot.view === "search"}
+          <div class="search-kinds" aria-label="Search type">
+            <button class:active={searchKind === "tracks"} on:click={() => searchKind = "tracks"}>tracks</button>
+            <button class:active={searchKind === "playlists"} on:click={() => searchKind = "playlists"}>playlists</button>
+          </div>
+        {:else if snapshot.view === "queue" && snapshot.queue.length}
+          <button class="clear-queue" on:click={() => void dispatch({ type: "clear_queue" })}>clear</button>
+        {:else if playlistDetailActive}
+          <button class="clear-queue" on:click={closePlaylist}>‹ playlists</button>
+        {/if}
+        <div class="view-meta">{showingPlaylists ? `${visiblePlaylists.length} playlists` : `${visibleTracks.length} tracks · ${duration(visibleTracks.reduce((sum, track) => sum + track.durationMs, 0))}`}</div>
+      </div>
     </div>
 
-    <div class="track-list" role="listbox" aria-label="Tracks">
+    <div class="track-list" role="listbox" aria-label={showingPlaylists ? "Playlists" : "Tracks"}>
+      {#if snapshot.view === "search" && !query.trim()}
+        <div class="empty-state">type to search spotify</div>
+      {:else if showingPlaylists}
+        {#each visiblePlaylists as playlist, index (playlist.id)}
+          <button
+            class="track-row playlist-row"
+            role="option"
+            aria-selected="false"
+            on:click={() => schedulePlaylistOpen(playlist)}
+            on:dblclick={(event) => { event.preventDefault(); if (playlistOpenTimer) clearTimeout(playlistOpenTimer); playlistOpenTimer = null; activatePlaylist(playlist); }}
+          >
+            <span class="track-index">{String(index + 1).padStart(2, "0")}</span>
+            <span class="track-main">
+              <strong>{playlist.name}</strong>
+              <span>{playlist.owner}</span>
+            </span>
+            <span class="track-album">playlist</span>
+            <span class="track-duration">{playlist.trackCount} tracks</span>
+          </button>
+        {:else}
+          <div class="empty-state">{searchPending ? "searching…" : searchError ?? "no playlists found"}</div>
+        {/each}
+        {#if searchCursors[searchKind] && !searchPending}
+          <button class="load-more" on:click={() => void searchSpotify(query.trim(), searchKind, true)}>more results</button>
+        {/if}
+      {:else if snapshot.view === "queue"}
+        {#each snapshot.queue as entry, index (entry.queueId)}
+          <div
+            class:selected={entry.queueId === selectedQueueId}
+            class:playing={entry.track.id === current?.id}
+            class="track-row queue-row"
+            role="option"
+            aria-selected={entry.queueId === selectedQueueId}
+            tabindex={entry.queueId === selectedQueueId ? 0 : -1}
+            draggable="true"
+            on:click={() => { selectedQueueId = entry.queueId; selectedId = entry.track.id; }}
+            on:keydown={(event) => { if (event.key === "Enter") activate(entry.track); }}
+            on:dblclick={() => activate(entry.track)}
+            on:dragstart={(event) => { draggedQueueId = entry.queueId; event.dataTransfer?.setData("text/plain", entry.queueId); }}
+            on:dragover={(event) => event.preventDefault()}
+            on:drop={(event) => dropQueueItem(event, index)}
+          >
+            <span class="queue-grip" aria-hidden="true">⠿</span>
+            <span class="track-index">{String(index + 1).padStart(2, "0")}</span>
+            <span class="track-main">
+              <strong>{entry.track.title}</strong>
+              <span>{entry.track.artists.join(", ")}</span>
+            </span>
+            <span class="track-album">{entry.track.album}</span>
+            <span class="track-duration">{duration(entry.track.durationMs)}</span>
+            <button class="queue-remove" aria-label={`Remove ${entry.track.title} from queue`} on:click={(event) => { event.stopPropagation(); removeQueueItem(entry.queueId); }}>×</button>
+          </div>
+        {:else}
+          <div class="empty-state">queue is empty</div>
+        {/each}
+      {:else}
       {#each visibleTracks as track, index (track.id)}
         <button
           class:selected={track.id === selectedId}
@@ -262,7 +625,7 @@
           aria-selected={track.id === selectedId}
           on:click={() => selectedId = track.id}
           on:dblclick={() => activate(track)}
-          on:contextmenu={(event) => { event.preventDefault(); void dispatch({ type: "enqueue", trackId: track.id }); statusMessage = `Queued ${track.title}`; }}
+          on:contextmenu={(event) => { event.preventDefault(); void dispatch({ type: "enqueue", trackId: track.id, track }); statusMessage = `Queued ${track.title}`; }}
         >
           <span class="track-index">{track.id === current?.id && snapshot.playback.playing ? "▸" : String(index + 1).padStart(2, "0")}</span>
           <span class="track-main">
@@ -273,8 +636,12 @@
           <span class="track-duration">{duration(track.durationMs)}</span>
         </button>
       {:else}
-        <div class="empty-state">no matching tracks</div>
+        <div class="empty-state">{playlistDetailActive ? (playlistOpening ? "opening playlist…" : playlistOpenError ?? "this playlist is empty") : searchPending ? "searching…" : searchError ?? "no matching tracks"}</div>
       {/each}
+      {#if snapshot.view === "search" && searchCursors[searchKind] && !searchPending}
+        <button class="load-more" on:click={() => void searchSpotify(query.trim(), searchKind, true)}>more results</button>
+      {/if}
+      {/if}
     </div>
 
     <footer class="player">
@@ -286,17 +653,18 @@
           max={current?.durationMs ?? 1}
           value={snapshot.playback.positionMs}
           aria-label="Seek"
-          on:input={(event) => void dispatch({ type: "seek", positionMs: Number(event.currentTarget.value) })}
+          on:input={(event) => previewSeek(Number(event.currentTarget.value))}
+          on:change={(event) => commitSeek(Number(event.currentTarget.value))}
         />
         <span>{current ? duration(current.durationMs) : "0:00"}</span>
       </div>
       <div class="now-playing">
         <div class="transport">
-          <button class:active={snapshot.playback.shuffle} aria-label="Toggle shuffle" on:click={() => void dispatch({ type: "toggle_shuffle" })}>⤨</button>
+          <button class:active={snapshot.playback.shuffle} aria-label="Toggle shuffle" aria-pressed={snapshot.playback.shuffle} on:click={() => void dispatch({ type: "toggle_shuffle" })}>⤨</button>
           <button aria-label="Previous track" on:click={() => void dispatch({ type: "previous" })}>◀</button>
-          <button class="play" aria-label="Toggle playback" on:click={() => void dispatch({ type: "toggle_playback" })}>{snapshot.playback.playing ? "Ⅱ" : "▶"}</button>
+          <button class="play" aria-label={snapshot.playback.playing ? "Pause" : "Play"} aria-pressed={snapshot.playback.playing} on:click={() => void dispatch({ type: "toggle_playback" })}>{snapshot.playback.playing ? "Ⅱ" : "▶"}</button>
           <button aria-label="Next track" on:click={() => void dispatch({ type: "next" })}>▶</button>
-          <button class:active={snapshot.playback.repeat !== "off"} aria-label="Cycle repeat" on:click={() => void dispatch({ type: "cycle_repeat" })}>↻</button>
+          <button class:active={snapshot.playback.repeat !== "off"} aria-label="Cycle repeat" aria-pressed={snapshot.playback.repeat !== "off"} on:click={() => void dispatch({ type: "cycle_repeat" })}>↻</button>
         </div>
         <div class="track-summary">
           <strong>{current?.title ?? "Nothing playing"}</strong>
@@ -304,7 +672,7 @@
         </div>
         <label class="volume">
           <span>vol</span>
-          <input type="range" min="0" max="1" step="0.01" value={snapshot.playback.volume} aria-label="Volume" on:input={(event) => void dispatch({ type: "set_volume", volume: Number(event.currentTarget.value) })} />
+          <input type="range" min="0" max="1" step="0.01" value={snapshot.playback.volume} aria-label="Volume" on:input={(event) => previewVolume(Number(event.currentTarget.value))} on:change={(event) => commitVolume(Number(event.currentTarget.value))} />
           <span>{percent(snapshot.playback.volume)}</span>
         </label>
       </div>
@@ -314,7 +682,14 @@
   {#if settingsOpen}
     <aside class="settings" aria-label="Visual preferences">
       <div class="settings-title">visual system <button aria-label="Close preferences" on:click={() => settingsOpen = false}>×</button></div>
-      <label class="toggle-row"><span>reactive visuals</span><input type="checkbox" checked={preferences.visualsEnabled} on:change={(event) => void setPreferences({ ...preferences, visualsEnabled: event.currentTarget.checked })} /></label>
+      <fieldset class="visual-source">
+        <legend>visual source</legend>
+        <div class="preference-buttons" aria-label="Visual source">
+          <button class:active={preferences.visualsEnabled} aria-pressed={preferences.visualsEnabled} on:click={() => selectVisualSource(true)}>reactive</button>
+          <button class:active={!preferences.visualsEnabled} aria-pressed={!preferences.visualsEnabled} on:click={() => selectVisualSource(false)}>static artwork</button>
+        </div>
+      </fieldset>
+      <button class="focus-mode-action" on:click={enterVisualMode}>open visual mode <span>↗</span></button>
       <fieldset>
         <legend>intensity</legend>
         {#each ["calm", "standard", "high"] as intensity}
@@ -327,9 +702,16 @@
           <button class:active={preferences.quality === quality} on:click={() => void setPreferences({ ...preferences, quality: quality as VisualQuality })}>{quality}</button>
         {/each}
       </fieldset>
-      <p>Reactive visuals use live audio features and adapt their workload. Turn them off for the static artwork. There are no manual palettes, shapes, or shader controls.</p>
+      <p>Reactive visuals use live audio features and adapt their workload. Static artwork keeps the frequency display without GPU motion. Visual mode hides the player chrome and always keeps a return button visible.</p>
       <button class="diagnostics" on:click={exportDiagnostics}>export diagnostics</button>
     </aside>
+  {/if}
+
+  {#if preferences.foregroundHidden}
+    <div class="visual-mode-return" role="region" aria-label="Visual mode controls">
+      <span>{preferences.visualsEnabled ? "reactive visual" : "static visual"}</span>
+      <button on:click={exitVisualMode}>return to player</button>
+    </div>
   {/if}
 
   {#if !snapshot.authenticated}
