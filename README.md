@@ -40,4 +40,4 @@ Every `v*` Git tag builds an NSIS installer on a clean Windows GitHub Actions ru
 
 ## Credits
 
-Magnet uses the Spotify desktop-client ecosystem, including selected architectural lineage from [ncspot](https://github.com/hrkfdn/ncspot) (BSD-2-Clause). See [NOTICE](NOTICE) for attribution and licensing detail.
+Magnet uses selected architectural ideas from [ncspot](https://github.com/hrkfdn/ncspot) (BSD-2-Clause). See [NOTICE](NOTICE) for attribution and licensing detail.
